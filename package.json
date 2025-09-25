@@ -1,0 +1,43 @@
+{
+    "name": "python-copy-qualified-name",
+    "displayName": "Python Copy Qualified Name",
+    "description": "Copy fully qualified Python method and function names to clipboard",
+    "version": "0.0.1",
+    "engines": {
+        "vscode": "^1.74.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "onLanguage:python"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "python-copy-qualified-name.copyQualifiedName",
+                "title": "Copy As Fully Qualified Name"
+            }
+        ],
+        "menus": {
+            "editor/context": [
+                {
+                    "command": "python-copy-qualified-name.copyQualifiedName",
+                    "when": "editorTextFocus && resourceExtname == .py",
+                    "group": "navigation"
+                }
+            ]
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.74.0",
+        "@types/node": "16.x",
+        "typescript": "^4.9.4"
+    }
+}
