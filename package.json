@@ -4,6 +4,11 @@
     "description": "Copy fully qualified Python method and function names to clipboard",
     "version": "1.0.1",
     "publisher": "DoctorC",
+    "license": "ISC",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/nidheesh-doctorc/vscode-copy-python-fqn.git"
+    },
     "engines": {
         "vscode": "^1.74.0"
     },
