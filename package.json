@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "publisher": "DoctorC",
     "engines": {
         "vscode": "^1.74.0"
@@ -29,7 +29,14 @@
                     "group": "navigation"
                 }
             ]
-        }
+        },
+        "keybindings": [
+            {
+                "command": "python-copy-qualified-name.copyQualifiedName",
+                "key": "cmd+alt+c",
+                "when": "editorTextFocus && resourceExtname == .py"
+            }
+        ]
     },
     "scripts": {
         "vscode:prepublish": "npm run compile",
