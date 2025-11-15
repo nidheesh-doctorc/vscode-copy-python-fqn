@@ -20,6 +20,26 @@
     ],
     "main": "./out/extension.js",
     "contributes": {
+        "configuration": {
+            "title": "Python Copy Qualified Name",
+            "properties": {
+                "pythonCopyQualifiedName.fileMonitor.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable monitoring of open Python files"
+                },
+                "pythonCopyQualifiedName.fileMonitor.checkInterval": {
+                    "type": "number",
+                    "default": 10,
+                    "description": "Interval in minutes to check for open Python files"
+                },
+                "pythonCopyQualifiedName.fileMonitor.maxFiles": {
+                    "type": "number",
+                    "default": 20,
+                    "description": "Maximum number of Python files that should be open before showing a warning"
+                }
+            }
+        },
         "commands": [
             {
                 "command": "python-copy-qualified-name.copyQualifiedName",

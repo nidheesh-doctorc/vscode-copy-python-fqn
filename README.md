@@ -4,19 +4,51 @@ A Visual Studio Code extension that adds a "Copy As Fully Qualified Name" option
 
 ## Features
 
+### Copy Fully Qualified Name
 - **Context Menu Integration**: Right-click inside any Python method or function to copy its fully qualified name
 - **Smart Detection**: Automatically detects the current context (class, method, function)
 - **Dot Notation**: Generates names in proper Python import format (e.g., `module.ClassName.method_name`)
 - **Workspace Aware**: Calculates module paths relative to your workspace root
 - **Python Only**: Context menu appears only in Python files
 
+### Python File Monitor
+- **Automatic Monitoring**: Tracks the number of open Python files in your workspace
+- **Configurable Thresholds**: Set your own limits for maximum open files (default: 20)
+- **Smart Notifications**: Periodic checks (every 10 minutes by default) alert you when too many files are open
+- **Oldest First**: Automatically suggests closing the oldest opened files
+- **One-Click Close**: Quickly close suggested files with a single button click
+
 ## Usage
+
+### Copy Qualified Name
 
 1. Open a Python file in VS Code
 2. Place your cursor inside a method, function, or class
 3. Right-click to open the context menu
 4. Select "Copy As Fully Qualified Name"
 5. The qualified name is copied to your clipboard
+
+### Python File Monitor
+
+The file monitor runs automatically in the background. When you have more than the configured number of Python files open (default: 20), you'll see a warning dialog that:
+
+1. Shows the total number of open Python files
+2. Lists the oldest files that should be closed
+3. Provides a "Close These Files" button to automatically close the suggested files
+4. Can be dismissed with "Not Now" if you want to keep your files open
+
+**Configuration Options:**
+
+You can customize the file monitor behavior in VS Code settings:
+
+- `pythonCopyQualifiedName.fileMonitor.enabled`: Enable or disable file monitoring (default: `true`)
+- `pythonCopyQualifiedName.fileMonitor.checkInterval`: How often to check in minutes (default: `10`)
+- `pythonCopyQualifiedName.fileMonitor.maxFiles`: Maximum number of Python files before warning (default: `20`)
+
+To access these settings:
+1. Open VS Code Settings (File > Preferences > Settings or `Cmd/Ctrl + ,`)
+2. Search for "Python Copy Qualified Name"
+3. Adjust the settings as needed
 
 ## Examples
 

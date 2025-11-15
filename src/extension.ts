@@ -1,7 +1,21 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { PythonFileMonitor } from './fileMonitor';
 
 export function activate(context: vscode.ExtensionContext) {
+    // Initialize file monitor
+    const fileMonitor = new PythonFileMonitor();
+    fileMonitor.start();
+    context.subscriptions.push(fileMonitor);
+
+    // Listen for configuration changes to restart the monitor
+    const configChangeListener = vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration('pythonCopyQualifiedName.fileMonitor')) {
+            fileMonitor.restartPeriodicCheck();
+        }
+    });
+    context.subscriptions.push(configChangeListener);
+
     let disposable = vscode.commands.registerCommand('python-copy-qualified-name.copyQualifiedName', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
