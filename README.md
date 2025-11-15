@@ -91,7 +91,24 @@ npm run watch
 
 ## Publishing
 
-To publish this extension to the VS Code Marketplace:
+### Automated Releases (Recommended)
+
+This repository includes a GitHub Action workflow that automatically builds and releases the VSIX file when you push a version tag:
+
+```bash
+# Update version in package.json first, then:
+git tag v1.0.2
+git push origin v1.0.2
+```
+
+The workflow will:
+- Build and package the VSIX file
+- Create a GitHub release
+- Upload the VSIX as a release asset
+
+### Manual Publishing
+
+To manually publish this extension to the VS Code Marketplace:
 
 1. Install vsce: `npm install -g vsce`
 2. Package the extension: `vsce package`
