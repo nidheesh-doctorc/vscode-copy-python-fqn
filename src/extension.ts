@@ -27,6 +27,12 @@ interface ParsedClassTestMethods {
     }[];
 }
 
+interface TestLaunchResult {
+    completed: boolean;
+    exitCode?: number;
+    errorMessage?: string;
+}
+
 export function activate(context: vscode.ExtensionContext) {
     // Initialize file monitor
     const fileMonitor = new PythonFileMonitor();
@@ -79,6 +85,33 @@ function setupMethodTestRunner(context: vscode.ExtensionContext): void {
     context.subscriptions.push(testController);
 
     const testMetadata = new Map<string, TestRunMetadata>();
+    const sessionExitCodes = new Map<string, number>();
+
+    const debugTracker = vscode.debug.registerDebugAdapterTrackerFactory('*', {
+        createDebugAdapterTracker: (session) => {
+            return {
+                onDidSendMessage: (message: unknown) => {
+                    if (!message || typeof message !== 'object') {
+                        return;
+                    }
+
+                    const typedMessage = message as {
+                        type?: string;
+                        event?: string;
+                        body?: { exitCode?: number };
+                    };
+
+                    if (typedMessage.type === 'event' && typedMessage.event === 'exited') {
+                        const exitCode = typedMessage.body?.exitCode;
+                        if (typeof exitCode === 'number') {
+                            sessionExitCodes.set(session.id, exitCode);
+                        }
+                    }
+                }
+            };
+        }
+    });
+    context.subscriptions.push(debugTracker);
 
     const refreshDocumentTests = async (document: vscode.TextDocument): Promise<void> => {
         if (document.languageId !== 'python' || !document.uri.fsPath.endsWith('.py')) {
@@ -125,11 +158,14 @@ function setupMethodTestRunner(context: vscode.ExtensionContext): void {
             }
 
             run.started(item);
-            const launched = await launchDoctorCTest(metadata, shouldDebug);
-            if (launched) {
+            const result = await launchDoctorCTest(metadata, shouldDebug, sessionExitCodes);
+            if (result.completed && result.exitCode === 0) {
                 run.passed(item);
             } else {
-                run.failed(item, new vscode.TestMessage('Failed to start test launch configuration.'));
+                const errorMessage = result.completed
+                    ? `Test process exited with code ${result.exitCode ?? 'unknown'}.`
+                    : result.errorMessage ?? 'Failed to start test launch configuration.';
+                run.failed(item, new vscode.TestMessage(errorMessage));
             }
         }
 
@@ -316,19 +352,92 @@ function flattenTestItems(items: readonly vscode.TestItem[]): vscode.TestItem[] 
     return leafItems;
 }
 
-async function launchDoctorCTest(metadata: TestRunMetadata, shouldDebug: boolean): Promise<boolean> {
+async function launchDoctorCTest(
+    metadata: TestRunMetadata,
+    shouldDebug: boolean,
+    sessionExitCodes: Map<string, number>
+): Promise<TestLaunchResult> {
     const rootFolder = getDoctorcWorkspaceFolder(metadata.uri);
     if (!rootFolder) {
         vscode.window.showWarningMessage('Could not find DoctorC workspace folder for this test file.');
-        return false;
+        return {
+            completed: false,
+            errorMessage: 'Could not find DoctorC workspace folder for this test file.'
+        };
     }
 
     const testTarget = buildTestTarget(metadata);
     const testKind = detectDoctorCTestKind(metadata.uri);
     const config = buildDebugConfiguration(rootFolder.uri.fsPath, testKind, testTarget);
 
-    return vscode.debug.startDebugging(rootFolder, config, {
-        noDebug: !shouldDebug
+    return startDebuggingAndWaitForExit(rootFolder, config, shouldDebug, sessionExitCodes);
+}
+
+async function startDebuggingAndWaitForExit(
+    rootFolder: vscode.WorkspaceFolder,
+    config: vscode.DebugConfiguration,
+    shouldDebug: boolean,
+    sessionExitCodes: Map<string, number>
+): Promise<TestLaunchResult> {
+    const runId = `python-copy-qualified-name:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    const debugConfig = {
+        ...config,
+        __pythonCopyQualifiedNameRunId: runId
+    };
+
+    return new Promise<TestLaunchResult>(async (resolve) => {
+        let startedSessionId: string | undefined;
+        let completed = false;
+
+        const cleanup = (): void => {
+            startListener.dispose();
+            terminateListener.dispose();
+        };
+
+        const startListener = vscode.debug.onDidStartDebugSession((session) => {
+            if (session.configuration?.__pythonCopyQualifiedNameRunId === runId) {
+                startedSessionId = session.id;
+            }
+        });
+
+        const terminateListener = vscode.debug.onDidTerminateDebugSession((session) => {
+            if (session.configuration?.__pythonCopyQualifiedNameRunId !== runId && session.id !== startedSessionId) {
+                return;
+            }
+
+            const exitCode = sessionExitCodes.get(session.id);
+            sessionExitCodes.delete(session.id);
+            completed = true;
+            cleanup();
+            resolve({
+                completed: true,
+                exitCode
+            });
+        });
+
+        const started = await vscode.debug.startDebugging(rootFolder, debugConfig, {
+            noDebug: !shouldDebug
+        });
+
+        if (!started) {
+            cleanup();
+            resolve({
+                completed: false,
+                errorMessage: 'Unable to start debugging session.'
+            });
+            return;
+        }
+
+        setTimeout(() => {
+            if (completed) {
+                return;
+            }
+            cleanup();
+            resolve({
+                completed: false,
+                errorMessage: 'Timed out waiting for test process to finish.'
+            });
+        }, 1000 * 60 * 60);
     });
 }
 
