@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.2.3",
+    "version": "1.2.4",
     "publisher": "DoctorC",
     "license": "ISC",
     "repository": {
@@ -25,7 +25,7 @@
             "properties": {
                 "pythonCopyQualifiedName.fileMonitor.enabled": {
                     "type": "boolean",
-                    "default": true,
+                    "default": false,
                     "description": "Enable monitoring of open Python files"
                 },
                 "pythonCopyQualifiedName.fileMonitor.checkInterval": {

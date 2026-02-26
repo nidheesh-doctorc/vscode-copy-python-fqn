@@ -1,6 +1,31 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import { PythonFileMonitor } from './fileMonitor';
+
+type DoctorCTestKind =
+    | 'unit'
+    | 'channels'
+    | 'selenium'
+    | 'appium'
+    | 'phleboAppium'
+    | 'homeService';
+
+interface TestRunMetadata {
+    uri: vscode.Uri;
+    modulePath: string;
+    className?: string;
+    methodName?: string;
+}
+
+interface ParsedClassTestMethods {
+    className: string;
+    classLine: number;
+    methods: {
+        methodName: string;
+        methodLine: number;
+    }[];
+}
 
 export function activate(context: vscode.ExtensionContext) {
     // Initialize file monitor
@@ -45,6 +70,445 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     context.subscriptions.push(disposable);
+
+    setupMethodTestRunner(context);
+}
+
+function setupMethodTestRunner(context: vscode.ExtensionContext): void {
+    const testController = vscode.tests.createTestController('python-copy-qualified-name.testRunner', 'Python Method Tests');
+    context.subscriptions.push(testController);
+
+    const testMetadata = new Map<string, TestRunMetadata>();
+
+    const refreshDocumentTests = async (document: vscode.TextDocument): Promise<void> => {
+        if (document.languageId !== 'python' || !document.uri.fsPath.endsWith('.py')) {
+            return;
+        }
+
+        await discoverDocumentTests(document, testController, testMetadata);
+    };
+
+    for (const document of vscode.workspace.textDocuments) {
+        void refreshDocumentTests(document);
+    }
+
+    const openListener = vscode.workspace.onDidOpenTextDocument((document) => {
+        void refreshDocumentTests(document);
+    });
+    context.subscriptions.push(openListener);
+
+    const saveListener = vscode.workspace.onDidSaveTextDocument((document) => {
+        void refreshDocumentTests(document);
+    });
+    context.subscriptions.push(saveListener);
+
+    const runHandler = async (
+        request: vscode.TestRunRequest,
+        token: vscode.CancellationToken,
+        shouldDebug: boolean
+    ): Promise<void> => {
+        const run = testController.createTestRun(request);
+
+        const includeItems = request.include?.length
+            ? request.include
+            : Array.from(testController.items).map(([, item]) => item);
+        const itemsToRun = flattenTestItems(includeItems);
+
+        for (const item of itemsToRun) {
+            if (token.isCancellationRequested) {
+                break;
+            }
+
+            const metadata = testMetadata.get(item.id);
+            if (!metadata) {
+                continue;
+            }
+
+            run.started(item);
+            const launched = await launchDoctorCTest(metadata, shouldDebug);
+            if (launched) {
+                run.passed(item);
+            } else {
+                run.failed(item, new vscode.TestMessage('Failed to start test launch configuration.'));
+            }
+        }
+
+        run.end();
+    };
+
+    const runProfile = testController.createRunProfile(
+        'Run Python Method Test',
+        vscode.TestRunProfileKind.Run,
+        (request, token) => {
+            void runHandler(request, token, false);
+        },
+        true
+    );
+    context.subscriptions.push(runProfile);
+
+    const debugProfile = testController.createRunProfile(
+        'Debug Python Method Test',
+        vscode.TestRunProfileKind.Debug,
+        (request, token) => {
+            void runHandler(request, token, true);
+        },
+        true
+    );
+    context.subscriptions.push(debugProfile);
+}
+
+async function discoverDocumentTests(
+    document: vscode.TextDocument,
+    controller: vscode.TestController,
+    metadataMap: Map<string, TestRunMetadata>
+): Promise<void> {
+    const rootFolder = getDoctorcWorkspaceFolder(document.uri);
+    if (!rootFolder) {
+        return;
+    }
+
+    const modulePath = getModulePathForWorkspace(document.uri, rootFolder.uri.fsPath);
+    if (!modulePath) {
+        return;
+    }
+
+    const fileId = `file:${document.uri.toString()}`;
+    metadataMap.forEach((metadata, key) => {
+        if (metadata.uri.toString() === document.uri.toString()) {
+            metadataMap.delete(key);
+        }
+    });
+
+    const existingFileItem = controller.items.get(fileId);
+    if (existingFileItem) {
+        controller.items.delete(fileId);
+    }
+
+    const parsedClassTests = parseClassTestMethods(document);
+    if (parsedClassTests.length === 0) {
+        return;
+    }
+
+    const fileItem = controller.createTestItem(fileId, path.basename(document.uri.fsPath), document.uri);
+    fileItem.range = new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 1));
+
+    let hasTests = false;
+
+    for (const classTests of parsedClassTests) {
+        const classItemId = `${fileId}:class:${classTests.className}:${classTests.classLine}`;
+        const classItem = controller.createTestItem(classItemId, classTests.className, document.uri);
+        classItem.range = new vscode.Range(
+            new vscode.Position(classTests.classLine, 0),
+            new vscode.Position(classTests.classLine, 1)
+        );
+
+        for (const method of classTests.methods) {
+            hasTests = true;
+
+            const methodItemId = `${classItemId}:method:${method.methodName}:${method.methodLine}`;
+            const methodItem = controller.createTestItem(methodItemId, method.methodName, document.uri);
+            methodItem.range = new vscode.Range(
+                new vscode.Position(method.methodLine, 0),
+                new vscode.Position(method.methodLine, 1)
+            );
+
+            metadataMap.set(methodItemId, {
+                uri: document.uri,
+                modulePath,
+                className: classTests.className,
+                methodName: method.methodName
+            });
+
+            classItem.children.add(methodItem);
+        }
+
+        metadataMap.set(classItemId, {
+            uri: document.uri,
+            modulePath,
+            className: classTests.className
+        });
+        fileItem.children.add(classItem);
+    }
+
+    if (hasTests) {
+        metadataMap.set(fileId, {
+            uri: document.uri,
+            modulePath
+        });
+        controller.items.add(fileItem);
+    }
+}
+
+function parseClassTestMethods(document: vscode.TextDocument): ParsedClassTestMethods[] {
+    const classes: ParsedClassTestMethods[] = [];
+    const classStack: { className: string; indent: number; classLine: number }[] = [];
+
+    for (let index = 0; index < document.lineCount; index++) {
+        const rawLine = document.lineAt(index).text;
+        const trimmedLine = rawLine.trim();
+
+        if (!trimmedLine || trimmedLine.startsWith('#')) {
+            continue;
+        }
+
+        const indent = rawLine.length - rawLine.trimStart().length;
+
+        while (classStack.length > 0 && indent <= classStack[classStack.length - 1].indent) {
+            classStack.pop();
+        }
+
+        const classMatch = rawLine.match(/^\s*class\s+([A-Za-z_]\w*)\b/);
+        if (classMatch) {
+            const className = classMatch[1];
+            classStack.push({ className, indent, classLine: index });
+            classes.push({
+                className,
+                classLine: index,
+                methods: []
+            });
+            continue;
+        }
+
+        const methodMatch = rawLine.match(/^\s*def\s+(test_[A-Za-z0-9_]*)\s*\(/);
+        if (!methodMatch || classStack.length === 0) {
+            continue;
+        }
+
+        const currentClass = classStack[classStack.length - 1];
+        if (indent <= currentClass.indent) {
+            continue;
+        }
+
+        const matchingClass = classes.find(
+            (entry) => entry.className === currentClass.className && entry.classLine === currentClass.classLine
+        );
+        if (!matchingClass) {
+            continue;
+        }
+
+        matchingClass.methods.push({
+            methodName: methodMatch[1],
+            methodLine: index
+        });
+    }
+
+    return classes.filter((entry) => entry.methods.length > 0);
+}
+
+function flattenTestItems(items: readonly vscode.TestItem[]): vscode.TestItem[] {
+    const stack = [...items];
+    const leafItems: vscode.TestItem[] = [];
+
+    while (stack.length > 0) {
+        const item = stack.pop();
+        if (!item) {
+            continue;
+        }
+
+        if (item.children.size === 0) {
+            leafItems.push(item);
+            continue;
+        }
+
+        item.children.forEach((child) => stack.push(child));
+    }
+
+    return leafItems;
+}
+
+async function launchDoctorCTest(metadata: TestRunMetadata, shouldDebug: boolean): Promise<boolean> {
+    const rootFolder = getDoctorcWorkspaceFolder(metadata.uri);
+    if (!rootFolder) {
+        vscode.window.showWarningMessage('Could not find DoctorC workspace folder for this test file.');
+        return false;
+    }
+
+    const testTarget = buildTestTarget(metadata);
+    const testKind = detectDoctorCTestKind(metadata.uri);
+    const config = buildDebugConfiguration(rootFolder.uri.fsPath, testKind, testTarget);
+
+    return vscode.debug.startDebugging(rootFolder, config, {
+        noDebug: !shouldDebug
+    });
+}
+
+function buildDebugConfiguration(
+    workspacePath: string,
+    testKind: DoctorCTestKind,
+    testTarget: string
+): vscode.DebugConfiguration {
+    const envFile = path.join(workspacePath, '.devcontainer/.env.test');
+
+    const baseConfig: vscode.DebugConfiguration = {
+        name: 'DoctorC Test',
+        type: 'debugpy',
+        request: 'launch',
+        autoStartBrowser: false,
+        envFile
+    };
+
+    if (testKind === 'homeService') {
+        return {
+            ...baseConfig,
+            name: 'DrC: HomeService Test',
+            program: path.join(workspacePath, 'manage_homeservice.py'),
+            args: [
+                'test',
+                '--noinput',
+                '--tag=home_service',
+                '--settings=home_service_microservice.settings',
+                '--keepdb',
+                testTarget
+            ]
+        };
+    }
+
+    const config: vscode.DebugConfiguration = {
+        ...baseConfig,
+        program: path.join(workspacePath, 'manage.py'),
+        args: ['test', '--noinput']
+    };
+
+    switch (testKind) {
+        case 'channels':
+            config.name = 'DrC: Channels Test';
+            config.env = {
+                ENABLE_CHANNELS: '1'
+            };
+            config.args = [
+                'test',
+                '--noinput',
+                '--pattern=channels*',
+                '--settings=doctorc.settings',
+                '--keepdb',
+                testTarget
+            ];
+            break;
+        case 'selenium':
+            config.name = 'DrC: Selenium Test';
+            config.args = [
+                'test',
+                '--noinput',
+                '--pattern=selenium*',
+                '--settings=doctorc.settings',
+                '--keepdb',
+                '--visualRegressionMode=assert',
+                testTarget
+            ];
+            break;
+        case 'appium':
+            config.name = 'DrC: Appium Test';
+            config.env = {
+                APP_TEST_SERVER_PORT: '13513',
+                APPIUM_SERVER: 'http://host.docker.internal:4723/wd/hub',
+                APP_SERVER_HOST: '10.0.2.2',
+                RUNNING_IN_ANDROID: '1'
+            };
+            config.args = [
+                'test',
+                '--noinput',
+                '--pattern=doctorc_appiumselenium*',
+                '--settings=doctorc.settings',
+                '--keepdb',
+                '--visualRegressionMode=assert',
+                testTarget
+            ];
+            break;
+        case 'phleboAppium':
+            config.name = 'DrC: Phlebo Appium Test';
+            config.env = {
+                APP_TEST_SERVER_PORT: '13513',
+                APPIUM_SERVER: 'http://host.docker.internal:4723/wd/hub',
+                APP_SERVER_HOST: '10.0.2.2',
+                RUNNING_IN_ANDROID: '1'
+            };
+            config.args = [
+                'test',
+                '--noinput',
+                '--pattern=phlebo_appiumselenium*',
+                '--settings=doctorc.settings',
+                '--keepdb',
+                '--visualRegressionMode=assert',
+                testTarget
+            ];
+            break;
+        case 'unit':
+        default:
+            config.name = 'DrC: Unit Test';
+            config.args = [
+                'test',
+                '--noinput',
+                '--exclude-tag=home_service',
+                '--settings=doctorc.settings',
+                '--keepdb',
+                testTarget
+            ];
+            break;
+    }
+
+    return config;
+}
+
+function buildTestTarget(metadata: TestRunMetadata): string {
+    const parts = [metadata.modulePath];
+    if (metadata.className) {
+        parts.push(metadata.className);
+    }
+    if (metadata.methodName) {
+        parts.push(metadata.methodName);
+    }
+    return parts.join('.');
+}
+
+function detectDoctorCTestKind(uri: vscode.Uri): DoctorCTestKind {
+    const lowerPath = uri.fsPath.replace(/\\/g, '/').toLowerCase();
+    const filename = path.basename(lowerPath);
+
+    if (lowerPath.includes('/home_service_microservice/')) {
+        return 'homeService';
+    }
+    if (filename.startsWith('phlebo_appiumselenium')) {
+        return 'phleboAppium';
+    }
+    if (filename.startsWith('doctorc_appiumselenium')) {
+        return 'appium';
+    }
+    if (filename.startsWith('selenium')) {
+        return 'selenium';
+    }
+    if (filename.startsWith('channels')) {
+        return 'channels';
+    }
+    return 'unit';
+}
+
+function getDoctorcWorkspaceFolder(uri: vscode.Uri): vscode.WorkspaceFolder | undefined {
+    const directWorkspace = vscode.workspace.getWorkspaceFolder(uri);
+    if (directWorkspace && isDoctorcRoot(directWorkspace.uri.fsPath)) {
+        return directWorkspace;
+    }
+
+    return vscode.workspace.workspaceFolders?.find((folder) => {
+        const rootPath = folder.uri.fsPath;
+        const isParent = uri.fsPath.startsWith(`${rootPath}${path.sep}`) || uri.fsPath === rootPath;
+        return isParent && isDoctorcRoot(rootPath);
+    });
+}
+
+function isDoctorcRoot(folderPath: string): boolean {
+    return fs.existsSync(path.join(folderPath, 'manage.py'));
+}
+
+function getModulePathForWorkspace(uri: vscode.Uri, workspaceRoot: string): string | null {
+    if (!uri.fsPath.startsWith(workspaceRoot)) {
+        return null;
+    }
+
+    const relativePath = path.relative(workspaceRoot, uri.fsPath);
+    return relativePath
+        .replace(/\\/g, '/')
+        .replace(/\.py$/, '')
+        .replace(/\//g, '.');
 }
 
 async function getQualifiedName(document: vscode.TextDocument, position: vscode.Position): Promise<string | null> {
@@ -71,13 +535,7 @@ function getModulePath(uri: vscode.Uri): string {
         return path.basename(uri.fsPath, '.py');
     }
 
-    const relativePath = path.relative(workspaceFolder.uri.fsPath, uri.fsPath);
-    const modulePath = relativePath
-        .replace(/\\/g, '/') // Convert Windows paths
-        .replace(/\.py$/, '') // Remove .py extension
-        .replace(/\//g, '.'); // Convert to dot notation
-
-    return modulePath;
+    return getModulePathForWorkspace(uri, workspaceFolder.uri.fsPath) ?? path.basename(uri.fsPath, '.py');
 }
 
 function findContext(lines: string[], currentLine: number): string | null {
