@@ -368,7 +368,13 @@ async function launchDoctorCTest(
 
     const testTarget = buildTestTarget(metadata);
     const testKind = detectDoctorCTestKind(metadata.uri);
-    const config = buildDebugConfiguration(rootFolder.uri.fsPath, testKind, testTarget);
+    const config = await getDebugConfigurationFromLaunchFile(rootFolder.uri.fsPath, testKind, testTarget);
+    if (!config) {
+        return {
+            completed: false,
+            errorMessage: 'Could not find matching launch configuration in .vscode/launch.json.'
+        };
+    }
 
     return startDebuggingAndWaitForExit(rootFolder, config, shouldDebug, sessionExitCodes);
 }
@@ -441,121 +447,154 @@ async function startDebuggingAndWaitForExit(
     });
 }
 
-function buildDebugConfiguration(
+async function getDebugConfigurationFromLaunchFile(
     workspacePath: string,
     testKind: DoctorCTestKind,
     testTarget: string
-): vscode.DebugConfiguration {
-    const envFile = path.join(workspacePath, '.devcontainer/.env.test');
+): Promise<vscode.DebugConfiguration | null> {
+    const launchPath = path.join(workspacePath, '.vscode', 'launch.json');
+    const launchFileExists = await fs.promises
+        .stat(launchPath)
+        .then(() => true)
+        .catch(() => false);
 
-    const baseConfig: vscode.DebugConfiguration = {
-        name: 'DoctorC Test',
-        type: 'debugpy',
-        request: 'launch',
-        autoStartBrowser: false,
-        envFile
-    };
-
-    if (testKind === 'homeService') {
-        return {
-            ...baseConfig,
-            name: 'DrC: HomeService Test',
-            program: path.join(workspacePath, 'manage_homeservice.py'),
-            args: [
-                'test',
-                '--noinput',
-                '--tag=home_service',
-                '--settings=home_service_microservice.settings',
-                '--keepdb',
-                testTarget
-            ]
-        };
+    if (!launchFileExists) {
+        return null;
     }
 
-    const config: vscode.DebugConfiguration = {
-        ...baseConfig,
-        program: path.join(workspacePath, 'manage.py'),
-        args: ['test', '--noinput']
-    };
+    const rawLaunchContent = await fs.promises.readFile(launchPath, 'utf8');
+    const parsedLaunch = parseJsonc(rawLaunchContent) as { configurations?: vscode.DebugConfiguration[] };
+    const launchConfigurations = parsedLaunch.configurations;
 
+    if (!Array.isArray(launchConfigurations)) {
+        return null;
+    }
+
+    const launchName = getLaunchNameForTestKind(testKind);
+    const selectedConfig = launchConfigurations.find((config) => config.name === launchName);
+    if (!selectedConfig) {
+        return null;
+    }
+
+    const clonedConfig = JSON.parse(JSON.stringify(selectedConfig)) as vscode.DebugConfiguration;
+    const resolvedConfig = replaceDynamicValues(clonedConfig, workspacePath, testTarget);
+    return resolvedConfig;
+}
+
+function getLaunchNameForTestKind(testKind: DoctorCTestKind): string {
     switch (testKind) {
         case 'channels':
-            config.name = 'DrC: Channels Test';
-            config.env = {
-                ENABLE_CHANNELS: '1'
-            };
-            config.args = [
-                'test',
-                '--noinput',
-                '--pattern=channels*',
-                '--settings=doctorc.settings',
-                '--keepdb',
-                testTarget
-            ];
-            break;
+            return 'DrC: Channels Test';
         case 'selenium':
-            config.name = 'DrC: Selenium Test';
-            config.args = [
-                'test',
-                '--noinput',
-                '--pattern=selenium*',
-                '--settings=doctorc.settings',
-                '--keepdb',
-                '--visualRegressionMode=assert',
-                testTarget
-            ];
-            break;
+            return 'DrC: Selenium Test';
         case 'appium':
-            config.name = 'DrC: Appium Test';
-            config.env = {
-                APP_TEST_SERVER_PORT: '13513',
-                APPIUM_SERVER: 'http://host.docker.internal:4723/wd/hub',
-                APP_SERVER_HOST: '10.0.2.2',
-                RUNNING_IN_ANDROID: '1'
-            };
-            config.args = [
-                'test',
-                '--noinput',
-                '--pattern=doctorc_appiumselenium*',
-                '--settings=doctorc.settings',
-                '--keepdb',
-                '--visualRegressionMode=assert',
-                testTarget
-            ];
-            break;
+            return 'DrC: Appium Test';
         case 'phleboAppium':
-            config.name = 'DrC: Phlebo Appium Test';
-            config.env = {
-                APP_TEST_SERVER_PORT: '13513',
-                APPIUM_SERVER: 'http://host.docker.internal:4723/wd/hub',
-                APP_SERVER_HOST: '10.0.2.2',
-                RUNNING_IN_ANDROID: '1'
-            };
-            config.args = [
-                'test',
-                '--noinput',
-                '--pattern=phlebo_appiumselenium*',
-                '--settings=doctorc.settings',
-                '--keepdb',
-                '--visualRegressionMode=assert',
-                testTarget
-            ];
-            break;
+            return 'DrC: Phlebo Appium Test';
+        case 'homeService':
+            return 'DrC: HomeService Test';
         case 'unit':
         default:
-            config.name = 'DrC: Unit Test';
-            config.args = [
-                'test',
-                '--noinput',
-                '--exclude-tag=home_service',
-                '--settings=doctorc.settings',
-                '--keepdb',
-                testTarget
-            ];
-            break;
+            return 'DrC: Unit Test';
+    }
+}
+
+function replaceDynamicValues(
+    config: vscode.DebugConfiguration,
+    workspacePath: string,
+    testTarget: string
+): vscode.DebugConfiguration {
+    return replaceDynamicValue(config, workspacePath, testTarget) as vscode.DebugConfiguration;
+}
+
+function replaceDynamicValue(value: unknown, workspacePath: string, testTarget: string): unknown {
+    if (typeof value === 'string') {
+        const withWorkspacePath = value.replace(/\$\{workspaceFolder\}/g, workspacePath);
+        return withWorkspacePath.replace(/\$\{input:([^}]+)\}/g, (_match, inputName: string) => {
+            if (inputName === 'visualRegressionMode') {
+                return 'assert';
+            }
+            return testTarget;
+        });
     }
 
-    return config;
+    if (Array.isArray(value)) {
+        return value.map((entry) => replaceDynamicValue(entry, workspacePath, testTarget));
+    }
+
+    if (value && typeof value === 'object') {
+        const resolved: Record<string, unknown> = {};
+        for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+            resolved[key] = replaceDynamicValue(nestedValue, workspacePath, testTarget);
+        }
+        return resolved;
+    }
+
+    return value;
+}
+
+function parseJsonc(content: string): unknown {
+    let output = '';
+    let inString = false;
+    let escape = false;
+    let inSingleLineComment = false;
+    let inMultiLineComment = false;
+
+    for (let index = 0; index < content.length; index++) {
+        const current = content[index];
+        const next = content[index + 1];
+
+        if (inSingleLineComment) {
+            if (current === '\n') {
+                inSingleLineComment = false;
+                output += current;
+            }
+            continue;
+        }
+
+        if (inMultiLineComment) {
+            if (current === '*' && next === '/') {
+                inMultiLineComment = false;
+                index++;
+            }
+            continue;
+        }
+
+        if (inString) {
+            output += current;
+            if (escape) {
+                escape = false;
+            } else if (current === '\\') {
+                escape = true;
+            } else if (current === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (current === '"') {
+            inString = true;
+            output += current;
+            continue;
+        }
+
+        if (current === '/' && next === '/') {
+            inSingleLineComment = true;
+            index++;
+            continue;
+        }
+
+        if (current === '/' && next === '*') {
+            inMultiLineComment = true;
+            index++;
+            continue;
+        }
+
+        output += current;
+    }
+
+    const withoutTrailingCommas = output.replace(/,\s*([}\]])/g, '$1');
+    return JSON.parse(withoutTrailingCommas);
 }
 
 function buildTestTarget(metadata: TestRunMetadata): string {

@@ -18,6 +18,14 @@ A Visual Studio Code extension that adds a "Copy As Fully Qualified Name" option
 - **Oldest First**: Automatically suggests closing the oldest opened files
 - **One-Click Close**: Quickly close suggested files with a single button click
 
+### Python Test Runner (Gutter Play Button)
+- **Method-Level Run/Debug**: Adds Run/Debug play buttons in the gutter for each `test_*` method inside test classes
+- **Test Explorer Integration**: Builds a file → class → method hierarchy in VS Code Test Explorer
+- **Launch Config Driven**: Reads `.vscode/launch.json` every time you click Run/Debug, so changing flags in `launch.json` is picked up immediately
+- **Automatic Test Target**: Replaces launch input placeholders with the selected dotted test path (for example, `analytics.tests.today_page.selenium_test_today_page.TestTodayPage.test_staff_user_morning`)
+- **Visual Regression Default**: Forces `visualRegressionMode` to `assert` automatically
+- **Accurate Result Status**: Waits for the test process to finish and marks pass/fail using the actual process exit code
+
 ## Usage
 
 ### Copy Qualified Name
@@ -50,6 +58,26 @@ To access these settings:
 2. Search for "Python Copy Qualified Name"
 3. Adjust the settings as needed
 
+### Run Tests from Gutter
+
+1. Open a Python test file in your DoctorC workspace
+2. Locate a method named `test_*` inside a test class
+3. Click the gutter Run/Debug play icon next to the method
+4. The extension loads the matching launch configuration from `.vscode/launch.json`
+5. The selected test runs with the method's dotted path appended automatically
+6. Test Explorer updates to Passed/Failed only after execution completes
+
+#### Launch Mapping Used
+
+The extension selects the launch configuration by file/path pattern:
+
+- `DrC: Channels Test` for files starting with `channels`
+- `DrC: Selenium Test` for files starting with `selenium`
+- `DrC: Appium Test` for files starting with `doctorc_appiumselenium`
+- `DrC: Phlebo Appium Test` for files starting with `phlebo_appiumselenium`
+- `DrC: HomeService Test` for files under `home_service_microservice/`
+- `DrC: Unit Test` as the default fallback
+
 ## Examples
 
 For a file at `src/services/user_service.py`:
@@ -68,6 +96,18 @@ def standalone_function():
     # Cursor here copies: src.services.user_service.standalone_function
     pass
 ```
+
+For a DoctorC test method:
+
+```python
+class TestTodayPage:
+    def test_staff_user_morning(self):
+        pass
+```
+
+Clicking Run/Debug from the gutter targets:
+
+`analytics.tests.today_page.selenium_test_today_page.TestTodayPage.test_staff_user_morning`
 
 ## Installation
 
