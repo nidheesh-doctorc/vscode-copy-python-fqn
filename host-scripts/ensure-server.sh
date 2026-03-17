@@ -59,10 +59,23 @@ if [[ -f "${PID_FILE}" ]]; then
     rm -f "${PID_FILE}"
 fi
 
-# Start server in background
+# Start server in background, fully detached from this shell session.
+# When run via `curl | bash`, the shell exits immediately — we need setsid
+# (or disown) to prevent the child from being killed with the session.
 LOG_FILE="${INSTALL_DIR}/server.log"
-nohup "${PYTHON}" "${INSTALLED_SERVER}" --port "${PORT}" >> "${LOG_FILE}" 2>&1 &
+if command -v setsid &>/dev/null; then
+    setsid "${PYTHON}" "${INSTALLED_SERVER}" --port "${PORT}" >> "${LOG_FILE}" 2>&1 &
+else
+    nohup "${PYTHON}" "${INSTALLED_SERVER}" --port "${PORT}" >> "${LOG_FILE}" 2>&1 &
+    disown 2>/dev/null || true
+fi
 echo $! > "${PID_FILE}"
 
-echo "[host-task-server] Started on port ${PORT} (pid $(cat "${PID_FILE}"))"
+# Give the server a moment to start and verify it's alive
+sleep 1
+if kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+    echo "[host-task-server] Started on port ${PORT} (pid $(cat "${PID_FILE}"))"
+else
+    echo "[host-task-server] WARNING: process exited immediately. Check ${LOG_FILE}"
+fi
 echo "[host-task-server] Log: ${LOG_FILE}"
