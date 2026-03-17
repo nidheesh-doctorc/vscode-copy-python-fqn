@@ -94,21 +94,31 @@ export class HostScriptRunner implements vscode.Disposable {
 
     /** Resolve the host-side workspace path for the current VS Code workspace. */
     private getWorkspacePath(): string | undefined {
-        // In a devcontainer, the host workspace is typically mounted at
-        // /workspaces/<name>. The real host path is in localWorkspaceFolder.
         const folders = vscode.workspace.workspaceFolders;
         if (!folders || folders.length === 0) {
             return undefined;
         }
-        // VS Code exposes the host-side path via the config set in devcontainer.json
+        // 1. Explicit override in settings
         const config = vscode.workspace.getConfiguration('pythonCopyQualifiedName.hostScripts');
         const override = config.get<string>('hostWorkspacePath', '');
         if (override) {
             return override;
         }
-        // Fallback: use the first workspace folder's fsPath.
-        // On the host this is correct; in a devcontainer the user should set hostWorkspacePath.
-        return folders[0].uri.fsPath;
+        // 2. HOST_PROJECT_PATH is set via remoteEnv in devcontainer.json
+        //    to pass the host-side workspace path into the container.
+        const hostPath = process.env.HOST_PROJECT_PATH;
+        if (hostPath) {
+            return hostPath;
+        }
+        // 3. Fallback: use fsPath directly (correct when running on the host)
+        const containerPath = folders[0].uri.fsPath;
+        if (containerPath.startsWith('/workspaces/')) {
+            this.outputChannel.appendLine(
+                `Warning: workspace path "${containerPath}" looks like a container path. ` +
+                `Add to devcontainer.json remoteEnv: { "HOST_PROJECT_PATH": "\${localWorkspaceFolder}" }`
+            );
+        }
+        return containerPath;
     }
 
     /** List tasks the host server exposes for the current workspace. */
@@ -336,10 +346,30 @@ export function registerHostScriptCommands(
                 const tasks = await runner.listTasks();
                 if (tasks.length === 0) {
                     vscode.window.showWarningMessage(
-                        'No host tasks found. Is the host server running? Are tasks prefixed with "Host:" in tasks.json?'
+                        'No host tasks found. Is the host server running? Do you have tasks with "type": "hostScript" in tasks.json?'
                     );
                     return [];
                 }
+                const items = tasks.map((t) => ({
+                    label: t.label,
+                    description: t.command
+                }));
+                const selected = await vscode.window.showQuickPick(items, {
+                    placeHolder: `${tasks.length} host task(s) available — pick one to run`,
+                    canPickMany: false
+                });
+                if (!selected) {
+                    return tasks;
+                }
+                const result = await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: `Running host task: ${selected.label}`,
+                        cancellable: false
+                    },
+                    async () => runner.runTask(selected.label)
+                );
+                runner.showOutput(selected.label, result);
                 return tasks;
             }
         )

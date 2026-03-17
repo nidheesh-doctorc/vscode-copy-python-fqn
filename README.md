@@ -112,20 +112,22 @@ Run commands on your **host machine** from inside a devcontainer. This is design
 
 #### Setup
 
-The host task server starts automatically — **no manual steps required**. Add one line to your `devcontainer.json`:
+The host task server starts automatically — **no manual steps required**. Add these lines to your `devcontainer.json`:
 
 ```jsonc
 {
     "initializeCommand": "curl -fsSL https://raw.githubusercontent.com/nidheesh-doctorc/vscode-copy-python-fqn/main/host-scripts/ensure-server.sh | bash",
+    "remoteEnv": {
+        "HOST_PROJECT_PATH": "${localWorkspaceFolder}"
+    },
     // ... rest of your devcontainer config
 }
 ```
 
-That's it. The `initializeCommand` runs **on the host** every time the container starts. The script:
-- Downloads `server.py` from GitHub to `~/.local/share/vscode-host-task-server/`
-- Starts the server if it's not already running
-- Is idempotent — safe to run repeatedly, won't duplicate processes
-- Logs to `~/.local/share/vscode-host-task-server/server.log`
+- **`initializeCommand`** runs **on the host** every time the container starts. It downloads and starts the server.
+- **`remoteEnv`** passes the host-side workspace path into the container so the extension knows where to find `tasks.json` on the host.
+
+The script downloads `server.py` to `~/.local/share/vscode-host-task-server/`, starts it if not already running, and is idempotent — safe to call repeatedly. Logs go to `~/.local/share/vscode-host-task-server/server.log`.
 
 > **Why `initializeCommand`?** It's the only devcontainer lifecycle hook that runs on the host machine. All others (`postCreateCommand`, `postStartCommand`, etc.) run inside the container.
 
@@ -148,7 +150,10 @@ Set the environment variable before the container starts:
 
 ```jsonc
 {
-    "initializeCommand": "HOST_TASK_SERVER_PORT=9999 curl -fsSL https://raw.githubusercontent.com/nidheesh-doctorc/vscode-copy-python-fqn/main/host-scripts/ensure-server.sh | bash"
+    "initializeCommand": "HOST_TASK_SERVER_PORT=9999 curl -fsSL https://raw.githubusercontent.com/nidheesh-doctorc/vscode-copy-python-fqn/main/host-scripts/ensure-server.sh | bash",
+    "remoteEnv": {
+        "HOST_PROJECT_PATH": "${localWorkspaceFolder}"
+    }
 }
 ```
 
