@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { PythonFileMonitor } from './fileMonitor';
+import { HostScriptRunner, registerHostScriptCommands } from './hostScriptRunner';
 
 type DoctorCTestKind =
     | 'unit'
@@ -78,6 +79,11 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(disposable);
 
     setupMethodTestRunner(context);
+
+    // Initialize host script runner for devcontainer → host communication
+    const hostScriptRunner = new HostScriptRunner();
+    context.subscriptions.push(hostScriptRunner);
+    registerHostScriptCommands(context, hostScriptRunner);
 }
 
 function setupMethodTestRunner(context: vscode.ExtensionContext): void {

@@ -1,0 +1,52 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    "version": "2.0.0",
+    "tasks": [
+        // ─── Host tasks (run on host machine via host task server) ───────
+        // Tasks with type "hostScript" are routed to the host task server.
+        // An LLM agent inside the devcontainer can trigger these via:
+        //   run_task with label "Host: Where am I?"
+        //   run_task with label "Host: Docker PS"
+
+        {
+            "label": "Host: Where am I?",
+            "type": "hostScript",
+            "command": "echo PWD=$PWD && hostname && whoami && echo OS=$(uname -s)"
+        },
+        {
+            "label": "Host: Docker PS",
+            "type": "hostScript",
+            "command": "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'"
+        },
+        {
+            "label": "Host: Disk Usage",
+            "type": "hostScript",
+            "command": "df -h | head -15"
+        },
+        {
+            "label": "Host: Git Status",
+            "type": "hostScript",
+            "command": "cd ${workspaceFolder} && git status --short && echo '---' && git log --oneline -5"
+        },
+        {
+            "label": "Host: Listening Ports",
+            "type": "hostScript",
+            "command": "lsof -i -P -n | grep LISTEN | head -30"
+        },
+        {
+            "label": "Host: Docker Compose Logs",
+            "type": "hostScript",
+            "command": "cd ${workspaceFolder} && docker compose logs --tail=50 2>/dev/null || echo 'No docker-compose project found'"
+        },
+        {
+            "label": "Host: Restart Docker Compose",
+            "type": "hostScript",
+            "command": "cd ${workspaceFolder} && docker compose restart"
+        },
+        {
+            "label": "Host: System Info",
+            "type": "hostScript",
+            "command": "echo '--- CPU ---' && sysctl -n machdep.cpu.brand_string 2>/dev/null || lscpu 2>/dev/null || echo 'N/A' && echo '--- Memory ---' && vm_stat 2>/dev/null || free -h 2>/dev/null || echo 'N/A' && echo '--- Uptime ---' && uptime"
+        }
+    ]
+}

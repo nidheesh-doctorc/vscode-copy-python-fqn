@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# ensure-server.sh — Idempotent installer + bootstrap for the host task server.
+#
+# Downloads server.py from GitHub, installs to a global location, starts
+# the server if not already running.
+# Safe to call repeatedly (e.g. from devcontainer.json initializeCommand).
+#
+# Usage in devcontainer.json:
+#   "initializeCommand": "curl -fsSL https://raw.githubusercontent.com/nidheesh-doctorc/vscode-copy-python-fqn/main/host-scripts/ensure-server.sh | bash"
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+REPO_RAW="https://raw.githubusercontent.com/nidheesh-doctorc/vscode-copy-python-fqn/main"
+PORT="${HOST_TASK_SERVER_PORT:-7890}"
+INSTALL_DIR="${HOME}/.local/share/vscode-host-task-server"
+INSTALLED_SERVER="${INSTALL_DIR}/server.py"
+PID_FILE="${INSTALL_DIR}/server.pid"
+
+# Find python3
+PYTHON="$(command -v python3 2>/dev/null || true)"
+if [[ -z "${PYTHON}" ]]; then
+    echo "[host-task-server] python3 not found, skipping server setup"
+    exit 0
+fi
+
+# Download/update server.py from GitHub
+mkdir -p "${INSTALL_DIR}"
+if command -v curl &>/dev/null; then
+    curl -fsSL "${REPO_RAW}/host-scripts/server.py" -o "${INSTALLED_SERVER}"
+elif command -v wget &>/dev/null; then
+    wget -qO "${INSTALLED_SERVER}" "${REPO_RAW}/host-scripts/server.py"
+else
+    echo "[host-task-server] Neither curl nor wget found, cannot download server.py"
+    exit 1
+fi
+echo "[host-task-server] Downloaded server.py to ${INSTALL_DIR}"
+
+# Check if server is already listening
+if command -v curl &>/dev/null; then
+    if curl -sf "http://localhost:${PORT}/health" &>/dev/null; then
+        echo "[host-task-server] Already running on port ${PORT}"
+        exit 0
+    fi
+elif command -v nc &>/dev/null; then
+    if nc -z localhost "${PORT}" 2>/dev/null; then
+        echo "[host-task-server] Already running on port ${PORT}"
+        exit 0
+    fi
+fi
+
+# Kill stale process if pid file exists
+if [[ -f "${PID_FILE}" ]]; then
+    OLD_PID=$(cat "${PID_FILE}" 2>/dev/null || true)
+    if [[ -n "${OLD_PID}" ]] && kill -0 "${OLD_PID}" 2>/dev/null; then
+        kill "${OLD_PID}" 2>/dev/null || true
+        sleep 0.5
+    fi
+    rm -f "${PID_FILE}"
+fi
+
+# Start server in background
+LOG_FILE="${INSTALL_DIR}/server.log"
+nohup "${PYTHON}" "${INSTALLED_SERVER}" --port "${PORT}" >> "${LOG_FILE}" 2>&1 &
+echo $! > "${PID_FILE}"
+
+echo "[host-task-server] Started on port ${PORT} (pid $(cat "${PID_FILE}"))"
+echo "[host-task-server] Log: ${LOG_FILE}"

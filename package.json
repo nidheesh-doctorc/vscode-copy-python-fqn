@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.2.6",
+    "version": "1.2.8",
     "publisher": "DoctorC",
     "license": "ISC",
     "repository": {
@@ -16,7 +16,8 @@
         "Other"
     ],
     "activationEvents": [
-        "onLanguage:python"
+        "onLanguage:python",
+        "onTaskType:hostScript"
     ],
     "main": "./out/extension.js",
     "contributes": {
@@ -37,13 +38,61 @@
                     "type": "number",
                     "default": 20,
                     "description": "Maximum number of Python files that should be open before showing a warning"
+                },
+                "pythonCopyQualifiedName.hostScripts.host": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Hostname of the host task server. Leave empty to auto-detect (localhost on host, host.docker.internal in devcontainer)"
+                },
+                "pythonCopyQualifiedName.hostScripts.port": {
+                    "type": "number",
+                    "default": 7890,
+                    "description": "Port the host task server listens on"
+                },
+                "pythonCopyQualifiedName.hostScripts.hostWorkspacePath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "The host-side filesystem path of this workspace. Required when running inside a devcontainer (e.g. /Users/you/src/project). Leave empty when on the host."
                 }
             }
         },
+        "taskDefinitions": [
+            {
+                "type": "hostScript",
+                "required": ["command"],
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute on the host machine"
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Extra arguments passed to the command"
+                    }
+                }
+            }
+        ],
         "commands": [
             {
                 "command": "python-copy-qualified-name.copyQualifiedName",
                 "title": "Copy As Fully Qualified Name"
+            },
+            {
+                "command": "python-copy-qualified-name.hostScripts.list",
+                "title": "Host Scripts: List Available Tasks"
+            },
+            {
+                "command": "python-copy-qualified-name.hostScripts.run",
+                "title": "Host Scripts: Run Task"
+            },
+            {
+                "command": "python-copy-qualified-name.hostScripts.runByName",
+                "title": "Host Scripts: Run Task by Label"
+            },
+            {
+                "command": "python-copy-qualified-name.hostScripts.status",
+                "title": "Host Scripts: Check Server Status"
             }
         ],
         "menus": {
