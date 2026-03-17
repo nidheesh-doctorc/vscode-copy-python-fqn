@@ -8,6 +8,15 @@ import * as http from 'http';
 interface HostTask {
     label: string;
     command: string;
+    args: string[];
+}
+
+interface InputDefinition {
+    id: string;
+    type: string;
+    description?: string;
+    default?: string;
+    options?: string[];
 }
 
 interface TaskRunResult {
@@ -122,26 +131,32 @@ export class HostScriptRunner implements vscode.Disposable {
     }
 
     /** List tasks the host server exposes for the current workspace. */
-    public async listTasks(): Promise<HostTask[]> {
+    public async listTasks(): Promise<{ tasks: HostTask[]; inputs: InputDefinition[] }> {
         const workspace = this.getWorkspacePath();
         if (!workspace) {
-            return [];
+            return { tasks: [], inputs: [] };
         }
         try {
             const body = JSON.stringify({ workspace });
             const res = await httpRequest('POST', this.host, this.port, '/tasks', body);
             if (res.status !== 200) {
-                return [];
+                return { tasks: [], inputs: [] };
             }
-            const data = JSON.parse(res.body) as { tasks: HostTask[] };
-            return data.tasks ?? [];
+            const data = JSON.parse(res.body) as { tasks: HostTask[]; inputs: InputDefinition[] };
+            return { tasks: data.tasks ?? [], inputs: data.inputs ?? [] };
         } catch {
-            return [];
+            return { tasks: [], inputs: [] };
         }
     }
 
     /** Run a host task by its label. */
-    public async runTask(label: string, args: string[] = []): Promise<TaskRunResult> {
+    public async runTask(
+        label: string,
+        args: string[] = [],
+        inputs?: Record<string, string>,
+        resolvedCommand?: string,
+        resolvedArgs?: string[]
+    ): Promise<TaskRunResult> {
         const workspace = this.getWorkspacePath();
         if (!workspace) {
             return {
@@ -152,8 +167,26 @@ export class HostScriptRunner implements vscode.Disposable {
             };
         }
         try {
-            const body = JSON.stringify({ workspace, label, args });
+            const payload: Record<string, unknown> = { workspace, label, args, inputs: inputs ?? {} };
+            if (resolvedCommand) {
+                payload.resolvedCommand = resolvedCommand;
+            }
+            if (resolvedArgs) {
+                payload.resolvedArgs = resolvedArgs;
+            }
+            const body = JSON.stringify(payload);
+            this.outputChannel.appendLine(`[runTask] label=${label} workspace=${workspace}`);
+            if (resolvedCommand) {
+                this.outputChannel.appendLine(`[runTask] resolvedCommand=${resolvedCommand}`);
+            }
+            if (resolvedArgs) {
+                this.outputChannel.appendLine(`[runTask] resolvedArgs=${JSON.stringify(resolvedArgs)}`);
+            }
+            if (inputs && Object.keys(inputs).length > 0) {
+                this.outputChannel.appendLine(`[runTask] inputs=${JSON.stringify(inputs)}`);
+            }
             const res = await httpRequest('POST', this.host, this.port, '/run', body);
+            this.outputChannel.appendLine(`[runTask] response status=${res.status}`);
             if (res.status === 404) {
                 const data = JSON.parse(res.body);
                 return {
@@ -214,6 +247,71 @@ export class HostScriptRunner implements vscode.Disposable {
 }
 
 // ---------------------------------------------------------------------------
+// Input variable resolution — detects ${input:XYZ} / ${hostInput:XYZ}
+// ---------------------------------------------------------------------------
+
+const INPUT_PATTERN = /\$\{(?:input|hostInput):([^}]+)\}/g;
+const VSCODE_INPUT_PATTERN = /\$\{input:([^}]+)\}/g;
+
+/** Extract unique input variable names from a task's command + args. */
+function extractInputVariables(task: HostTask): string[] {
+    const text = [task.command, ...task.args].join(' ');
+    const names = new Set<string>();
+    let match: RegExpExecArray | null;
+    INPUT_PATTERN.lastIndex = 0;
+    while ((match = INPUT_PATTERN.exec(text)) !== null) {
+        names.add(match[1]);
+    }
+    return [...names];
+}
+
+function hasVsCodeInputVariables(task: HostTask): boolean {
+    const text = [task.command, ...task.args].join(' ');
+    VSCODE_INPUT_PATTERN.lastIndex = 0;
+    return VSCODE_INPUT_PATTERN.test(text);
+}
+
+function replaceInputPatterns(value: string, key: string, resolved: string): string {
+    return value
+        .split(`\${input:${key}}`)
+        .join(resolved)
+        .split(`\${hostInput:${key}}`)
+        .join(resolved);
+}
+
+/** Prompt the user for each input variable, using input definitions from tasks.json when available. */
+async function resolveInputVariables(
+    varNames: string[],
+    inputDefs: InputDefinition[]
+): Promise<Record<string, string> | undefined> {
+    const resolved: Record<string, string> = {};
+    const defMap = new Map(inputDefs.map((d) => [d.id, d]));
+
+    for (const name of varNames) {
+        const def = defMap.get(name);
+        let value: string | undefined;
+
+        if (def?.type === 'pickString' && def.options && def.options.length > 0) {
+            value = await vscode.window.showQuickPick(def.options, {
+                placeHolder: def.description ?? `Select value for ${name}`
+            });
+        } else {
+            value = await vscode.window.showInputBox({
+                prompt: def?.description ?? `Enter value for ${name}`,
+                value: def?.default ?? ''
+            });
+        }
+
+        if (value === undefined) {
+            // User cancelled
+            return undefined;
+        }
+        resolved[name] = value;
+    }
+    return resolved;
+}
+
+// ---------------------------------------------------------------------------
 // Task provider — exposes host tasks as runnable VS Code tasks
 // ---------------------------------------------------------------------------
 
@@ -223,7 +321,7 @@ export class HostScriptTaskProvider implements vscode.TaskProvider {
     constructor(private runner: HostScriptRunner) {}
 
     async provideTasks(): Promise<vscode.Task[]> {
-        const tasks = await this.runner.listTasks();
+        const { tasks, inputs } = await this.runner.listTasks();
 
         return tasks.map((t) => {
             const definition: HostScriptTaskDefinition = {
@@ -237,7 +335,7 @@ export class HostScriptTaskProvider implements vscode.TaskProvider {
                 t.label,
                 'hostScript',
                 new vscode.CustomExecution(
-                    async () => new HostScriptTerminal(this.runner, t.label, [])
+                    async () => new HostScriptTerminal(this.runner, t.label, t.args, t, inputs)
                 )
             );
             task.detail = `Host command: ${t.command}`;
@@ -251,18 +349,28 @@ export class HostScriptTaskProvider implements vscode.TaskProvider {
             return undefined;
         }
 
+        const hostTask: HostTask = {
+            label: task.name,
+            command: definition.command,
+            args: definition.args ?? []
+        };
+
         return new vscode.Task(
             definition,
             task.scope ?? vscode.TaskScope.Workspace,
             task.name,
             'hostScript',
             new vscode.CustomExecution(
-                async () =>
-                    new HostScriptTerminal(
+                async () => {
+                    const { inputs } = await this.runner.listTasks();
+                    return new HostScriptTerminal(
                         this.runner,
                         task.name,
-                        definition.args ?? []
-                    )
+                        definition.args ?? [],
+                        hostTask,
+                        inputs
+                    );
+                }
             )
         );
     }
@@ -282,7 +390,9 @@ class HostScriptTerminal implements vscode.Pseudoterminal {
     constructor(
         private runner: HostScriptRunner,
         private label: string,
-        private args: string[]
+        private args: string[],
+        private task?: HostTask,
+        private inputDefs?: InputDefinition[]
     ) {}
 
     open(): void {
@@ -292,19 +402,56 @@ class HostScriptTerminal implements vscode.Pseudoterminal {
     close(): void {}
 
     private async run(): Promise<void> {
-        this.writeEmitter.fire(`Running host task: ${this.label}\r\n`);
-        if (this.args.length > 0) {
-            this.writeEmitter.fire(`Args: ${this.args.join(', ')}\r\n`);
+        this.writeEmitter.fire(`Host task: ${this.label}\r\n`);
+
+        let command = this.task?.command ?? '';
+        let args = [...this.args];
+
+        // VS Code does NOT expose resolved values for CustomExecution tasks.
+        // For hostScript tasks prefer ${hostInput:name} to avoid the extra
+        // built-in VS Code prompt caused by ${input:name}.
+        const allText = [command, ...args].join(' ');
+        const inputNames = new Set<string>();
+        let match: RegExpExecArray | null;
+        const re = /\$\{(?:input|hostInput):([^}]+)\}/g;
+        while ((match = re.exec(allText)) !== null) {
+            inputNames.add(match[1]);
         }
+
+        if (this.task && hasVsCodeInputVariables(this.task)) {
+            this.writeEmitter.fire(
+                'Note: ${input:...} in hostScript tasks triggers a VS Code prompt before this runner. ' +
+                'Use ${hostInput:...} to avoid double prompting.\r\n'
+            );
+        }
+
+        if (inputNames.size > 0) {
+            this.writeEmitter.fire(`Inputs needed: ${[...inputNames].join(', ')}\r\n`);
+            const resolved = await resolveInputVariables([...inputNames], this.inputDefs ?? []);
+            if (resolved === undefined) {
+                this.writeEmitter.fire('Cancelled by user.\r\n');
+                this.closeEmitter.fire(1);
+                return;
+            }
+            // Substitute in command and args
+            for (const [key, value] of Object.entries(resolved)) {
+                command = replaceInputPatterns(command, key, value);
+                args = args.map((arg) => replaceInputPatterns(arg, key, value));
+            }
+            this.writeEmitter.fire(`Resolved inputs: ${JSON.stringify(resolved)}\r\n`);
+        }
+
+        this.writeEmitter.fire(`Command: ${command}\r\n`);
+        this.writeEmitter.fire(`Args: ${JSON.stringify(args)}\r\n`);
         this.writeEmitter.fire('---\r\n');
 
-        const result = await this.runner.runTask(this.label, this.args);
+        const result = await this.runner.runTask(this.label, [], undefined, command, args);
 
         if (result.output) {
             this.writeEmitter.fire(result.output.replace(/\n/g, '\r\n'));
         }
         if (result.error) {
-            this.writeEmitter.fire('\r\n--- Error ---\r\n');
+            this.writeEmitter.fire('\r\n--- stderr ---\r\n');
             this.writeEmitter.fire(result.error.replace(/\n/g, '\r\n'));
         }
 
@@ -343,7 +490,7 @@ export function registerHostScriptCommands(
         vscode.commands.registerCommand(
             'python-copy-qualified-name.hostScripts.list',
             async () => {
-                const tasks = await runner.listTasks();
+                const { tasks, inputs } = await runner.listTasks();
                 if (tasks.length === 0) {
                     vscode.window.showWarningMessage(
                         'No host tasks found. Is the host server running? Do you have tasks with "type": "hostScript" in tasks.json?'
@@ -361,13 +508,25 @@ export function registerHostScriptCommands(
                 if (!selected) {
                     return tasks;
                 }
+                // Resolve ${input:...} variables
+                const task = tasks.find((t) => t.label === selected.label);
+                let resolvedInputs: Record<string, string> | undefined;
+                if (task) {
+                    const varNames = extractInputVariables(task);
+                    if (varNames.length > 0) {
+                        resolvedInputs = await resolveInputVariables(varNames, inputs);
+                        if (resolvedInputs === undefined) {
+                            return tasks; // cancelled
+                        }
+                    }
+                }
                 const result = await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
                         title: `Running host task: ${selected.label}`,
                         cancellable: false
                     },
-                    async () => runner.runTask(selected.label)
+                    async () => runner.runTask(selected.label, [], resolvedInputs)
                 );
                 runner.showOutput(selected.label, result);
                 return tasks;
@@ -388,7 +547,7 @@ export function registerHostScriptCommands(
                     return null;
                 }
 
-                const tasks = await runner.listTasks();
+                const { tasks, inputs } = await runner.listTasks();
                 if (tasks.length === 0) {
                     vscode.window.showWarningMessage('No host tasks available.');
                     return null;
@@ -402,13 +561,18 @@ export function registerHostScriptCommands(
                     return null;
                 }
 
-                const argsInput = await vscode.window.showInputBox({
-                    prompt: 'Arguments (comma-separated, or leave empty)',
-                    placeHolder: 'arg1, arg2, ...'
-                });
-                const args = argsInput
-                    ? argsInput.split(',').map((a) => a.trim()).filter(Boolean)
-                    : [];
+                // Resolve ${input:...} variables
+                const task = tasks.find((t) => t.label === selected.label);
+                let resolvedInputs: Record<string, string> | undefined;
+                if (task) {
+                    const varNames = extractInputVariables(task);
+                    if (varNames.length > 0) {
+                        resolvedInputs = await resolveInputVariables(varNames, inputs);
+                        if (resolvedInputs === undefined) {
+                            return null; // cancelled
+                        }
+                    }
+                }
 
                 return vscode.window.withProgress(
                     {
@@ -417,7 +581,7 @@ export function registerHostScriptCommands(
                         cancellable: false
                     },
                     async () => {
-                        const result = await runner.runTask(selected.label, args);
+                        const result = await runner.runTask(selected.label, [], resolvedInputs);
                         if (result.success) {
                             vscode.window.showInformationMessage(
                                 `Host task '${selected.label}' completed.`

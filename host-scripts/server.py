@@ -88,15 +88,16 @@ def validate_workspace(workspace: str) -> str | None:
     return resolved
 
 
-def load_host_tasks(workspace: str) -> list[dict]:
-    """Read .vscode/tasks.json from workspace and return type=hostScript tasks."""
+def load_host_tasks(workspace: str) -> tuple[list[dict], list[dict]]:
+    """Read .vscode/tasks.json from workspace and return type=hostScript tasks + inputs."""
     tasks_path = Path(workspace) / ".vscode" / "tasks.json"
     if not tasks_path.exists():
-        return []
+        return [], []
 
     raw = tasks_path.read_text(encoding="utf-8")
     data = json.loads(strip_jsonc_comments(raw))
     all_tasks = data.get("tasks", [])
+    inputs = data.get("inputs", [])
 
     host_tasks = []
     for task in all_tasks:
@@ -109,24 +110,54 @@ def load_host_tasks(workspace: str) -> list[dict]:
                     "options": task.get("options", {}),
                 }
             )
-    return host_tasks
+    return host_tasks, inputs
 
 
-def run_task(task: dict, extra_args: list[str], workspace: str) -> dict:
+def run_task(
+    task: dict,
+    extra_args: list[str],
+    workspace: str,
+    inputs: dict[str, str] | None = None,
+    resolved_command: str | None = None,
+    resolved_args: list[str] | None = None,
+) -> dict:
     """Execute a task's shell command on the host and return the result."""
-    command = task.get("command", "")
-    task_args = task.get("args", [])
     options = task.get("options", {})
     cwd = options.get("cwd", workspace)
     cwd = cwd.replace("${workspaceFolder}", workspace)
 
-    if task.get("type", "shell") == "shell":
+    if resolved_command:
+        # Extension resolved command/args already.
+        if resolved_args is not None:
+            command_argv = [resolved_command, *resolved_args, *extra_args]
+            print("  Using resolved argv from extension")
+            print(f"  Argv: {command_argv}")
+        else:
+            full_command = resolved_command
+            print("  Using resolved command from extension")
+    else:
+        command = task.get("command", "")
+        task_args = task.get("args", [])
+
+        # Substitute ${input:XYZ} patterns with provided values
+        if inputs:
+            for key, value in inputs.items():
+                pattern = "${input:" + key + "}"
+                command = command.replace(pattern, value)
+                task_args = [a.replace(pattern, value) for a in task_args]
+                cwd = cwd.replace(pattern, value)
+
         parts = [command] + task_args + extra_args
         full_command = " ".join(parts)
-    else:
-        full_command = command
 
-    full_command = full_command.replace("${workspaceFolder}", workspace)
+    cwd = cwd.replace("${workspaceFolder}", workspace)
+    print(f"  Cwd: {cwd}")
+
+    if resolved_command and resolved_args is not None:
+        command_argv = [part.replace("${workspaceFolder}", workspace) for part in command_argv]
+    else:
+        full_command = full_command.replace("${workspaceFolder}", workspace)
+        print(f"  Command: {full_command}")
 
     env = os.environ.copy()
     env_vars = options.get("env", {})
@@ -138,15 +169,26 @@ def run_task(task: dict, extra_args: list[str], workspace: str) -> dict:
     timeout = 120
 
     try:
-        proc = subprocess.run(
-            full_command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=env,
-        )
+        if resolved_command and resolved_args is not None:
+            proc = subprocess.run(
+                command_argv,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env=env,
+            )
+        else:
+            proc = subprocess.run(
+                full_command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env=env,
+            )
         return {
             "success": proc.returncode == 0,
             "exitCode": proc.returncode,
@@ -221,15 +263,16 @@ class TaskHandler(BaseHTTPRequestHandler):
             workspace = self._get_workspace(request)
             if workspace is None:
                 return
-            tasks = load_host_tasks(workspace)
+            tasks, inputs = load_host_tasks(workspace)
             self._send_json(
                 200,
                 {
                     "workspace": workspace,
                     "tasks": [
-                        {"label": t["label"], "command": t["command"]}
+                        {"label": t["label"], "command": t["command"], "args": t["args"]}
                         for t in tasks
                     ],
+                    "inputs": inputs,
                 },
             )
             return
@@ -244,6 +287,9 @@ class TaskHandler(BaseHTTPRequestHandler):
 
             label = request.get("label", "")
             extra_args = request.get("args", [])
+            input_values = request.get("inputs", {})
+            resolved_command = request.get("resolvedCommand", None)
+            resolved_args = request.get("resolvedArgs", None)
 
             if not label:
                 self._send_json(400, {"error": "'label' is required"})
@@ -255,7 +301,18 @@ class TaskHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "'args' must be an array of strings"})
                 return
 
-            tasks = load_host_tasks(workspace)
+            if not isinstance(input_values, dict):
+                self._send_json(400, {"error": "'inputs' must be an object"})
+                return
+
+            if resolved_args is not None and (
+                not isinstance(resolved_args, list)
+                or not all(isinstance(a, str) for a in resolved_args)
+            ):
+                self._send_json(400, {"error": "'resolvedArgs' must be an array of strings"})
+                return
+
+            tasks, _ = load_host_tasks(workspace)
             task = next((t for t in tasks if t["label"] == label), None)
 
             if not task:
@@ -271,7 +328,20 @@ class TaskHandler(BaseHTTPRequestHandler):
 
             short_ws = os.path.basename(workspace)
             print(f"  Running: [{short_ws}] {label}")
-            result = run_task(task, extra_args, workspace)
+            if resolved_command:
+                print("  resolvedCommand provided by extension")
+            if resolved_args is not None:
+                print(f"  resolvedArgs: {resolved_args}")
+            elif input_values:
+                print(f"  inputs: {input_values}")
+            result = run_task(
+                task,
+                extra_args,
+                workspace,
+                input_values,
+                resolved_command,
+                resolved_args,
+            )
             status_text = "OK" if result["success"] else "FAILED"
             print(f"  [{status_text}] exit={result['exitCode']}")
 

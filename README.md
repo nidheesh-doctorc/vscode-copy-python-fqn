@@ -29,6 +29,7 @@ A Visual Studio Code extension that adds a "Copy As Fully Qualified Name" option
 ### Host Task Runner (Devcontainer → Host)
 - **Run Host Commands**: Execute shell commands on the host machine from inside a devcontainer
 - **tasks.json Driven**: Uses `.vscode/tasks.json` — tasks with `"type": "hostScript"` run on the host
+- **Host Input Support**: Use `${hostInput:name}` in host tasks to prompt once for task parameters
 - **HTTP Bridge**: Lightweight Python server on host, no shared volumes needed
 - **Agent-Friendly**: LLM agents can trigger host tasks via `run_task` or extension commands
 - **Structured Results**: Returns exit code, stdout, and stderr as structured data
@@ -161,6 +162,11 @@ Set the environment variable before the container starts:
 
 Add tasks to `.vscode/tasks.json` with `"type": "hostScript"`. Only tasks with this type are routed to the host server — all other task types are unaffected.
 
+For task inputs, prefer `${hostInput:name}` inside `command` or `args`.
+
+- `${hostInput:name}` is resolved by this extension and prompts once.
+- `${input:name}` uses VS Code's built-in task input system and can prompt twice for `hostScript` tasks because the task engine and the custom runner both need the value.
+
 ```jsonc
 {
     "version": "2.0.0",
@@ -195,6 +201,39 @@ Add tasks to `.vscode/tasks.json` with `"type": "hostScript"`. Only tasks with t
 ```
 
 The server re-reads `tasks.json` on every request, so you can add or edit tasks without restarting it.
+
+#### Host task inputs
+
+Example with a single prompt for a branch name:
+
+```jsonc
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "DoctorC: Create Worktree",
+            "type": "hostScript",
+            "command": "bash",
+            "args": [
+                "-c",
+                "./.devcontainer/scripts/create-drc-worktree.sh ${hostInput:worktreeBranchName}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "worktreeBranchName",
+            "type": "promptString",
+            "description": "Branch name for the new worktree"
+        }
+    ]
+}
+```
+
+The `inputs` section still defines the prompt metadata. The difference is only the placeholder syntax used by the `hostScript` task.
 
 #### Triggering host tasks
 
