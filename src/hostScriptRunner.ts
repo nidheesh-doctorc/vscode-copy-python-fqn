@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
+import * as fs from 'fs';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -9,6 +10,12 @@ interface HostTask {
     label: string;
     command: string;
     args: string[];
+    options?: HostTaskOptions;
+}
+
+interface HostTaskOptions {
+    cwd?: string;
+    env?: Record<string, string>;
 }
 
 interface InputDefinition {
@@ -29,6 +36,7 @@ interface TaskRunResult {
 interface HostScriptTaskDefinition extends vscode.TaskDefinition {
     command: string;
     args?: string[];
+    options?: HostTaskOptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +163,8 @@ export class HostScriptRunner implements vscode.Disposable {
         args: string[] = [],
         inputs?: Record<string, string>,
         resolvedCommand?: string,
-        resolvedArgs?: string[]
+        resolvedArgs?: string[],
+        resolvedEnv?: Record<string, string>
     ): Promise<TaskRunResult> {
         const workspace = this.getWorkspacePath();
         if (!workspace) {
@@ -174,6 +183,9 @@ export class HostScriptRunner implements vscode.Disposable {
             if (resolvedArgs) {
                 payload.resolvedArgs = resolvedArgs;
             }
+            if (resolvedEnv) {
+                payload.resolvedEnv = resolvedEnv;
+            }
             const body = JSON.stringify(payload);
             this.outputChannel.appendLine(`[runTask] label=${label} workspace=${workspace}`);
             if (resolvedCommand) {
@@ -181,6 +193,9 @@ export class HostScriptRunner implements vscode.Disposable {
             }
             if (resolvedArgs) {
                 this.outputChannel.appendLine(`[runTask] resolvedArgs=${JSON.stringify(resolvedArgs)}`);
+            }
+            if (resolvedEnv) {
+                this.outputChannel.appendLine(`[runTask] resolvedEnv=${JSON.stringify(resolvedEnv)}`);
             }
             if (inputs && Object.keys(inputs).length > 0) {
                 this.outputChannel.appendLine(`[runTask] inputs=${JSON.stringify(inputs)}`);
@@ -225,6 +240,23 @@ export class HostScriptRunner implements vscode.Disposable {
         this.port = config.get<number>('port', 7890);
     }
 
+    public resolveTaskEnv(
+        task: HostTask,
+        inputs?: Record<string, string>
+    ): Record<string, string> | undefined {
+        const env = task.options?.env;
+        if (!env || Object.keys(env).length === 0) {
+            return undefined;
+        }
+
+        const workspace = this.getWorkspacePath();
+        const resolvedEnv: Record<string, string> = {};
+        for (const [key, value] of Object.entries(env)) {
+            resolvedEnv[key] = resolveTaskValue(value, workspace, inputs);
+        }
+        return resolvedEnv;
+    }
+
     /** Show output in the dedicated output channel. */
     public showOutput(heading: string, result: TaskRunResult): void {
         this.outputChannel.clear();
@@ -247,11 +279,13 @@ export class HostScriptRunner implements vscode.Disposable {
 }
 
 // ---------------------------------------------------------------------------
-// Input variable resolution — detects ${input:XYZ} / ${hostInput:XYZ}
+// Input and env variable resolution
 // ---------------------------------------------------------------------------
 
 const INPUT_PATTERN = /\$\{(?:input|hostInput):([^}]+)\}/g;
 const VSCODE_INPUT_PATTERN = /\$\{input:([^}]+)\}/g;
+const ENV_PATTERN = /\$\{env:([^}]+)\}/g;
+let initProcessEnvCache: Record<string, string> | null | undefined;
 
 /** Extract unique input variable names from a task's command + args. */
 function extractInputVariables(task: HostTask): string[] {
@@ -277,6 +311,68 @@ function replaceInputPatterns(value: string, key: string, resolved: string): str
         .join(resolved)
         .split(`\${hostInput:${key}}`)
         .join(resolved);
+}
+
+function readInitProcessEnvironment(): Record<string, string> | null {
+    if (initProcessEnvCache !== undefined) {
+        return initProcessEnvCache;
+    }
+
+    try {
+        const raw = fs.readFileSync('/proc/1/environ', 'utf8');
+        const parsed: Record<string, string> = {};
+        for (const entry of raw.split('\0')) {
+            if (!entry) {
+                continue;
+            }
+            const separatorIndex = entry.indexOf('=');
+            if (separatorIndex <= 0) {
+                continue;
+            }
+            const key = entry.slice(0, separatorIndex);
+            const value = entry.slice(separatorIndex + 1);
+            parsed[key] = value;
+        }
+        initProcessEnvCache = parsed;
+    } catch {
+        initProcessEnvCache = null;
+    }
+
+    return initProcessEnvCache;
+}
+
+function getEnvironmentVariable(name: string): string | undefined {
+    const currentValue = process.env[name];
+    if (currentValue !== undefined) {
+        return currentValue;
+    }
+
+    const initEnv = readInitProcessEnvironment();
+    return initEnv?.[name];
+}
+
+function replaceEnvPatterns(value: string): string {
+    return value.replace(ENV_PATTERN, (match, key: string) => getEnvironmentVariable(key) ?? match);
+}
+
+function resolveTaskValue(
+    value: string,
+    workspacePath?: string,
+    inputs?: Record<string, string>
+): string {
+    let resolved = value;
+
+    if (workspacePath) {
+        resolved = resolved.replace(/\$\{workspaceFolder\}/g, workspacePath);
+    }
+
+    if (inputs) {
+        for (const [key, inputValue] of Object.entries(inputs)) {
+            resolved = replaceInputPatterns(resolved, key, inputValue);
+        }
+    }
+
+    return replaceEnvPatterns(resolved);
 }
 
 /** Prompt the user for each input variable, using input definitions from tasks.json when available. */
@@ -326,7 +422,9 @@ export class HostScriptTaskProvider implements vscode.TaskProvider {
         return tasks.map((t) => {
             const definition: HostScriptTaskDefinition = {
                 type: HostScriptTaskProvider.type,
-                command: t.command
+                command: t.command,
+                args: t.args,
+                options: t.options
             };
 
             const task = new vscode.Task(
@@ -349,12 +447,6 @@ export class HostScriptTaskProvider implements vscode.TaskProvider {
             return undefined;
         }
 
-        const hostTask: HostTask = {
-            label: task.name,
-            command: definition.command,
-            args: definition.args ?? []
-        };
-
         return new vscode.Task(
             definition,
             task.scope ?? vscode.TaskScope.Workspace,
@@ -362,11 +454,17 @@ export class HostScriptTaskProvider implements vscode.TaskProvider {
             'hostScript',
             new vscode.CustomExecution(
                 async () => {
-                    const { inputs } = await this.runner.listTasks();
+                    const { tasks, inputs } = await this.runner.listTasks();
+                    const hostTask = tasks.find((candidate) => candidate.label === task.name) ?? {
+                        label: task.name,
+                        command: definition.command,
+                        args: definition.args ?? [],
+                        options: definition.options
+                    };
                     return new HostScriptTerminal(
                         this.runner,
                         task.name,
-                        definition.args ?? [],
+                        hostTask.args,
                         hostTask,
                         inputs
                     );
@@ -406,6 +504,7 @@ class HostScriptTerminal implements vscode.Pseudoterminal {
 
         let command = this.task?.command ?? '';
         let args = [...this.args];
+        let resolvedInputs: Record<string, string> | undefined;
 
         // VS Code does NOT expose resolved values for CustomExecution tasks.
         // For hostScript tasks prefer ${hostInput:name} to avoid the extra
@@ -427,25 +526,32 @@ class HostScriptTerminal implements vscode.Pseudoterminal {
 
         if (inputNames.size > 0) {
             this.writeEmitter.fire(`Inputs needed: ${[...inputNames].join(', ')}\r\n`);
-            const resolved = await resolveInputVariables([...inputNames], this.inputDefs ?? []);
-            if (resolved === undefined) {
+            resolvedInputs = await resolveInputVariables([...inputNames], this.inputDefs ?? []);
+            if (resolvedInputs === undefined) {
                 this.writeEmitter.fire('Cancelled by user.\r\n');
                 this.closeEmitter.fire(1);
                 return;
             }
             // Substitute in command and args
-            for (const [key, value] of Object.entries(resolved)) {
+            for (const [key, value] of Object.entries(resolvedInputs)) {
                 command = replaceInputPatterns(command, key, value);
                 args = args.map((arg) => replaceInputPatterns(arg, key, value));
             }
-            this.writeEmitter.fire(`Resolved inputs: ${JSON.stringify(resolved)}\r\n`);
+            this.writeEmitter.fire(`Resolved inputs: ${JSON.stringify(resolvedInputs)}\r\n`);
         }
+
+        const resolvedEnv = this.task ? this.runner.resolveTaskEnv(this.task, resolvedInputs) : undefined;
+        command = replaceEnvPatterns(command);
+        args = args.map((arg) => replaceEnvPatterns(arg));
 
         this.writeEmitter.fire(`Command: ${command}\r\n`);
         this.writeEmitter.fire(`Args: ${JSON.stringify(args)}\r\n`);
+        if (resolvedEnv) {
+            this.writeEmitter.fire(`Env: ${JSON.stringify(resolvedEnv)}\r\n`);
+        }
         this.writeEmitter.fire('---\r\n');
 
-        const result = await this.runner.runTask(this.label, [], undefined, command, args);
+        const result = await this.runner.runTask(this.label, [], undefined, command, args, resolvedEnv);
 
         if (result.output) {
             this.writeEmitter.fire(result.output.replace(/\n/g, '\r\n'));
@@ -520,13 +626,14 @@ export function registerHostScriptCommands(
                         }
                     }
                 }
+                const resolvedEnv = task ? runner.resolveTaskEnv(task, resolvedInputs) : undefined;
                 const result = await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
                         title: `Running host task: ${selected.label}`,
                         cancellable: false
                     },
-                    async () => runner.runTask(selected.label, [], resolvedInputs)
+                    async () => runner.runTask(selected.label, [], resolvedInputs, undefined, undefined, resolvedEnv)
                 );
                 runner.showOutput(selected.label, result);
                 return tasks;
@@ -573,6 +680,7 @@ export function registerHostScriptCommands(
                         }
                     }
                 }
+                const resolvedEnv = task ? runner.resolveTaskEnv(task, resolvedInputs) : undefined;
 
                 return vscode.window.withProgress(
                     {
@@ -581,7 +689,14 @@ export function registerHostScriptCommands(
                         cancellable: false
                     },
                     async () => {
-                        const result = await runner.runTask(selected.label, [], resolvedInputs);
+                        const result = await runner.runTask(
+                            selected.label,
+                            [],
+                            resolvedInputs,
+                            undefined,
+                            undefined,
+                            resolvedEnv
+                        );
                         if (result.success) {
                             vscode.window.showInformationMessage(
                                 `Host task '${selected.label}' completed.`
@@ -607,7 +722,10 @@ export function registerHostScriptCommands(
                 if (!label) {
                     return { success: false, error: 'Task label is required' };
                 }
-                const result = await runner.runTask(label, args ?? []);
+                const { tasks } = await runner.listTasks();
+                const task = tasks.find((candidate) => candidate.label === label);
+                const resolvedEnv = task ? runner.resolveTaskEnv(task) : undefined;
+                const result = await runner.runTask(label, args ?? [], undefined, undefined, undefined, resolvedEnv);
                 runner.showOutput(label, result);
                 return result;
             }

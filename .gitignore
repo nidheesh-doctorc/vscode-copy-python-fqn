@@ -1,3 +1,5 @@
 node_modules
 out
 *.vsix
+*.pyc
+__pycache__

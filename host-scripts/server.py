@@ -20,14 +20,15 @@ import json
 import os
 import re
 import subprocess
-import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 DEFAULT_PORT = 7890
 TASK_TYPE = "hostScript"
+INPUT_PATTERN = re.compile(r"\$\{(?:input|hostInput):([^}]+)\}")
+ENV_PATTERN = re.compile(r"\$\{env:([^}]+)\}")
 
 
 def strip_jsonc_comments(text: str) -> str:
@@ -113,6 +114,30 @@ def load_host_tasks(workspace: str) -> tuple[list[dict], list[dict]]:
     return host_tasks, inputs
 
 
+def replace_input_patterns(value: str, inputs: dict[str, str] | None) -> str:
+    """Replace ${input:NAME} and ${hostInput:NAME} placeholders."""
+    if not inputs:
+        return value
+    return INPUT_PATTERN.sub(lambda match: inputs.get(match.group(1), match.group(0)), value)
+
+
+def replace_env_patterns(value: str, env: dict[str, str]) -> str:
+    """Replace ${env:NAME} placeholders using the host environment."""
+    return ENV_PATTERN.sub(lambda match: env.get(match.group(1), match.group(0)), value)
+
+
+def expand_task_value(
+    value: str,
+    workspace: str,
+    env: dict[str, str],
+    inputs: dict[str, str] | None = None,
+) -> str:
+    """Expand VS Code-style placeholders used by host tasks."""
+    expanded = value.replace("${workspaceFolder}", workspace)
+    expanded = replace_input_patterns(expanded, inputs)
+    return replace_env_patterns(expanded, env)
+
+
 def run_task(
     task: dict,
     extra_args: list[str],
@@ -120,53 +145,52 @@ def run_task(
     inputs: dict[str, str] | None = None,
     resolved_command: str | None = None,
     resolved_args: list[str] | None = None,
+    resolved_env: dict[str, str] | None = None,
 ) -> dict:
     """Execute a task's shell command on the host and return the result."""
     options = task.get("options", {})
     cwd = options.get("cwd", workspace)
-    cwd = cwd.replace("${workspaceFolder}", workspace)
+    env = os.environ.copy()
+    env_vars = options.get("env", {})
+    for k, v in env_vars.items():
+        env[k] = expand_task_value(str(v), workspace, env, inputs)
+    if resolved_env:
+        for key, value in resolved_env.items():
+            env[key] = expand_task_value(str(value), workspace, env, inputs)
+    for i, arg in enumerate(extra_args, 1):
+        env[f"ARG{i}"] = str(arg)
+
+    cwd = expand_task_value(str(cwd), workspace, env, inputs)
 
     if resolved_command:
         # Extension resolved command/args already.
         if resolved_args is not None:
             command_argv = [resolved_command, *resolved_args, *extra_args]
+            command_argv = [expand_task_value(str(part), workspace, env, inputs) for part in command_argv]
             print("  Using resolved argv from extension")
             print(f"  Argv: {command_argv}")
         else:
-            full_command = resolved_command
+            full_command = expand_task_value(str(resolved_command), workspace, env, inputs)
             print("  Using resolved command from extension")
     else:
         command = task.get("command", "")
         task_args = task.get("args", [])
 
-        # Substitute ${input:XYZ} patterns with provided values
-        if inputs:
-            for key, value in inputs.items():
-                pattern = "${input:" + key + "}"
-                command = command.replace(pattern, value)
-                task_args = [a.replace(pattern, value) for a in task_args]
-                cwd = cwd.replace(pattern, value)
+        command = expand_task_value(str(command), workspace, env, inputs)
+        task_args = [expand_task_value(str(arg), workspace, env, inputs) for arg in task_args]
+        extra_args = [expand_task_value(str(arg), workspace, env, inputs) for arg in extra_args]
 
         parts = [command] + task_args + extra_args
         full_command = " ".join(parts)
 
-    cwd = cwd.replace("${workspaceFolder}", workspace)
     print(f"  Cwd: {cwd}")
+    print(f" Env: { {k: env[k] for k in sorted(env_vars.keys())} }")
 
-    if resolved_command and resolved_args is not None:
-        command_argv = [part.replace("${workspaceFolder}", workspace) for part in command_argv]
-    else:
+    if not (resolved_command and resolved_args is not None):
         full_command = full_command.replace("${workspaceFolder}", workspace)
         print(f"  Command: {full_command}")
 
-    env = os.environ.copy()
-    env_vars = options.get("env", {})
-    for k, v in env_vars.items():
-        env[k] = str(v).replace("${workspaceFolder}", workspace)
-    for i, arg in enumerate(extra_args, 1):
-        env[f"ARG{i}"] = str(arg)
-
-    timeout = 120
+    timeout = 600
 
     try:
         if resolved_command and resolved_args is not None:
@@ -269,7 +293,12 @@ class TaskHandler(BaseHTTPRequestHandler):
                 {
                     "workspace": workspace,
                     "tasks": [
-                        {"label": t["label"], "command": t["command"], "args": t["args"]}
+                        {
+                            "label": t["label"],
+                            "command": t["command"],
+                            "args": t["args"],
+                            "options": t["options"],
+                        }
                         for t in tasks
                     ],
                     "inputs": inputs,
@@ -290,6 +319,7 @@ class TaskHandler(BaseHTTPRequestHandler):
             input_values = request.get("inputs", {})
             resolved_command = request.get("resolvedCommand", None)
             resolved_args = request.get("resolvedArgs", None)
+            resolved_env = request.get("resolvedEnv", None)
 
             if not label:
                 self._send_json(400, {"error": "'label' is required"})
@@ -310,6 +340,13 @@ class TaskHandler(BaseHTTPRequestHandler):
                 or not all(isinstance(a, str) for a in resolved_args)
             ):
                 self._send_json(400, {"error": "'resolvedArgs' must be an array of strings"})
+                return
+
+            if resolved_env is not None and (
+                not isinstance(resolved_env, dict)
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in resolved_env.items())
+            ):
+                self._send_json(400, {"error": "'resolvedEnv' must be an object of string values"})
                 return
 
             tasks, _ = load_host_tasks(workspace)
@@ -341,6 +378,7 @@ class TaskHandler(BaseHTTPRequestHandler):
                 input_values,
                 resolved_command,
                 resolved_args,
+                resolved_env,
             )
             status_text = "OK" if result["success"] else "FAILED"
             print(f"  [{status_text}] exit={result['exitCode']}")

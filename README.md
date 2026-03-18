@@ -30,6 +30,7 @@ A Visual Studio Code extension that adds a "Copy As Fully Qualified Name" option
 - **Run Host Commands**: Execute shell commands on the host machine from inside a devcontainer
 - **tasks.json Driven**: Uses `.vscode/tasks.json` — tasks with `"type": "hostScript"` run on the host
 - **Host Input Support**: Use `${hostInput:name}` in host tasks to prompt once for task parameters
+- **Env Variable Expansion**: `${env:NAME}` is expanded against the host environment before execution
 - **HTTP Bridge**: Lightweight Python server on host, no shared volumes needed
 - **Agent-Friendly**: LLM agents can trigger host tasks via `run_task` or extension commands
 - **Structured Results**: Returns exit code, stdout, and stderr as structured data
@@ -166,6 +167,7 @@ For task inputs, prefer `${hostInput:name}` inside `command` or `args`.
 
 - `${hostInput:name}` is resolved by this extension and prompts once.
 - `${input:name}` uses VS Code's built-in task input system and can prompt twice for `hostScript` tasks because the task engine and the custom runner both need the value.
+- `${env:NAME}` is expanded on the host using the host server process environment.
 
 ```jsonc
 {
@@ -189,7 +191,7 @@ For task inputs, prefer `${hostInput:name}` inside `command` or `args`.
         {
             "label": "Host: Restart Docker Compose",
             "type": "hostScript",
-            "command": "cd ${workspaceFolder} && docker compose restart"
+            "command": "cd ${workspaceFolder} && COMPOSE_PROJECT_NAME=${env:COMPOSE_PROJECT_NAME} docker compose restart"
         },
         {
             "label": "Host: Run Migrations",
