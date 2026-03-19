@@ -16,6 +16,7 @@ PORT="${HOST_TASK_SERVER_PORT:-7890}"
 INSTALL_DIR="${HOME}/.local/share/vscode-host-task-server"
 INSTALLED_SERVER="${INSTALL_DIR}/server.py"
 PID_FILE="${INSTALL_DIR}/server.pid"
+TMP_SERVER="${INSTALL_DIR}/server.py.tmp"
 
 # Find python3
 PYTHON="$(command -v python3 2>/dev/null || true)"
@@ -26,26 +27,43 @@ fi
 
 # Download/update server.py from GitHub
 mkdir -p "${INSTALL_DIR}"
+OLD_HASH=""
+if [[ -f "${INSTALLED_SERVER}" ]]; then
+    OLD_HASH="$(shasum -a 256 "${INSTALLED_SERVER}" | awk '{print $1}')"
+fi
 if command -v curl &>/dev/null; then
-    curl -fsSL "${REPO_RAW}/host-scripts/server.py" -o "${INSTALLED_SERVER}"
+    curl -fsSL "${REPO_RAW}/host-scripts/server.py" -o "${TMP_SERVER}"
 elif command -v wget &>/dev/null; then
-    wget -qO "${INSTALLED_SERVER}" "${REPO_RAW}/host-scripts/server.py"
+    wget -qO "${TMP_SERVER}" "${REPO_RAW}/host-scripts/server.py"
 else
     echo "[host-task-server] Neither curl nor wget found, cannot download server.py"
     exit 1
 fi
+mv "${TMP_SERVER}" "${INSTALLED_SERVER}"
 echo "[host-task-server] Downloaded server.py to ${INSTALL_DIR}"
+
+NEW_HASH="$(shasum -a 256 "${INSTALLED_SERVER}" | awk '{print $1}')"
+SERVER_CHANGED=0
+if [[ "${OLD_HASH}" != "${NEW_HASH}" ]]; then
+    SERVER_CHANGED=1
+fi
 
 # Check if server is already listening
 if command -v curl &>/dev/null; then
     if curl -sf "http://localhost:${PORT}/health" &>/dev/null; then
-        echo "[host-task-server] Already running on port ${PORT}"
-        exit 0
+        if [[ "${SERVER_CHANGED}" -eq 0 ]]; then
+            echo "[host-task-server] Already running on port ${PORT}"
+            exit 0
+        fi
+        echo "[host-task-server] Server code changed; restarting existing server on port ${PORT}"
     fi
 elif command -v nc &>/dev/null; then
     if nc -z localhost "${PORT}" 2>/dev/null; then
-        echo "[host-task-server] Already running on port ${PORT}"
-        exit 0
+        if [[ "${SERVER_CHANGED}" -eq 0 ]]; then
+            echo "[host-task-server] Already running on port ${PORT}"
+            exit 0
+        fi
+        echo "[host-task-server] Server code changed; restarting existing server on port ${PORT}"
     fi
 fi
 

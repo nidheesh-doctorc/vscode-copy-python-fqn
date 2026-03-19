@@ -146,21 +146,33 @@ def run_task(
     resolved_command: str | None = None,
     resolved_args: list[str] | None = None,
     resolved_env: dict[str, str] | None = None,
+    resolved_cwd: str | None = None,
 ) -> dict:
     """Execute a task's shell command on the host and return the result."""
     options = task.get("options", {})
-    cwd = options.get("cwd", workspace)
+    cwd = resolved_cwd if resolved_cwd is not None else options.get("cwd", workspace)
     env = os.environ.copy()
     env_vars = options.get("env", {})
+
+    print(f"  Raw options.cwd: {options.get('cwd', None)}")
+    print(f"  Raw options.env: {env_vars}")
+    if resolved_cwd is not None:
+        print(f"  resolvedCwd from extension: {resolved_cwd}")
+    if resolved_env is not None:
+        print(f"  resolvedEnv from extension: {resolved_env}")
+
     for k, v in env_vars.items():
         env[k] = expand_task_value(str(v), workspace, env, inputs)
     if resolved_env:
         for key, value in resolved_env.items():
-            env[key] = expand_task_value(str(value), workspace, env, inputs)
+            env[key] = str(value)
     for i, arg in enumerate(extra_args, 1):
         env[f"ARG{i}"] = str(arg)
 
-    cwd = expand_task_value(str(cwd), workspace, env, inputs)
+    if resolved_cwd is None:
+        cwd = expand_task_value(str(cwd), workspace, env, inputs)
+    else:
+        cwd = str(resolved_cwd)
 
     if resolved_command:
         # Extension resolved command/args already.
@@ -184,13 +196,13 @@ def run_task(
         full_command = " ".join(parts)
 
     print(f"  Cwd: {cwd}")
-    print(f" Env: { {k: env[k] for k in sorted(env_vars.keys())} }")
+    print(f"  Env after resolution: { {k: env[k] for k in sorted(env_vars.keys())} }")
 
     if not (resolved_command and resolved_args is not None):
         full_command = full_command.replace("${workspaceFolder}", workspace)
         print(f"  Command: {full_command}")
 
-    timeout = 600
+    timeout = 1200
 
     try:
         if resolved_command and resolved_args is not None:
@@ -320,6 +332,7 @@ class TaskHandler(BaseHTTPRequestHandler):
             resolved_command = request.get("resolvedCommand", None)
             resolved_args = request.get("resolvedArgs", None)
             resolved_env = request.get("resolvedEnv", None)
+            resolved_cwd = request.get("resolvedCwd", None)
 
             if not label:
                 self._send_json(400, {"error": "'label' is required"})
@@ -349,6 +362,10 @@ class TaskHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "'resolvedEnv' must be an object of string values"})
                 return
 
+            if resolved_cwd is not None and not isinstance(resolved_cwd, str):
+                self._send_json(400, {"error": "'resolvedCwd' must be a string"})
+                return
+
             tasks, _ = load_host_tasks(workspace)
             task = next((t for t in tasks if t["label"] == label), None)
 
@@ -369,6 +386,10 @@ class TaskHandler(BaseHTTPRequestHandler):
                 print("  resolvedCommand provided by extension")
             if resolved_args is not None:
                 print(f"  resolvedArgs: {resolved_args}")
+            if resolved_cwd is not None:
+                print(f"  resolvedCwd: {resolved_cwd}")
+            if resolved_env is not None:
+                print(f"  resolvedEnv keys: {sorted(resolved_env.keys())}")
             elif input_values:
                 print(f"  inputs: {input_values}")
             result = run_task(
@@ -379,6 +400,7 @@ class TaskHandler(BaseHTTPRequestHandler):
                 resolved_command,
                 resolved_args,
                 resolved_env,
+                resolved_cwd,
             )
             status_text = "OK" if result["success"] else "FAILED"
             print(f"  [{status_text}] exit={result['exitCode']}")

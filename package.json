@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.3.9",
+    "version": "1.3.13",
     "publisher": "DoctorC",
     "license": "ISC",
     "repository": {
@@ -69,6 +69,23 @@
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Extra arguments passed to the command"
+                    },
+                    "options": {
+                        "type": "object",
+                        "description": "Execution options for the host task",
+                        "properties": {
+                            "cwd": {
+                                "type": "string",
+                                "description": "Working directory for the host task"
+                            },
+                            "env": {
+                                "type": "object",
+                                "description": "Environment variables for the host task",
+                                "additionalProperties": {
+                                    "type": "string"
+                                }
+                            }
+                        }
                     }
                 }
             }
