@@ -5,6 +5,9 @@ import { PythonFileMonitor } from './fileMonitor';
 import { HostScriptRunner, registerHostScriptCommands } from './hostScriptRunner';
 
 const WORKTREE_TITLE_PREFIX = 'worktree';
+const WORKTREE_IDENTITY_MODE_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.mode';
+
+type WorktreeIdentityMode = 'workspaceSettings' | 'statusBar';
 
 type DoctorCTestKind =
     | 'unit'
@@ -91,13 +94,30 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 function setupWorktreeWindowIdentity(context: vscode.ExtensionContext): void {
+    const statusBarItem = vscode.window.createStatusBarItem(
+        'python-copy-qualified-name.worktreeIdentity',
+        vscode.StatusBarAlignment.Left,
+        1000
+    );
+    statusBarItem.name = 'Worktree Identity';
+    context.subscriptions.push(statusBarItem);
+
     const updateWindowIdentity = async (): Promise<void> => {
         const workspaceFolder = getPreferredWorkspaceFolder();
         if (!workspaceFolder) {
+            statusBarItem.hide();
             return;
         }
 
         const worktreeName = await resolveWorktreeName(workspaceFolder.uri.fsPath);
+        const mode = getWorktreeIdentityMode();
+
+        if (mode === 'statusBar') {
+            updateWorktreeStatusBarItem(statusBarItem, worktreeName);
+            return;
+        }
+
+        statusBarItem.hide();
         await updateWindowTitle(workspaceFolder, worktreeName);
         await updateWindowTitleColors(workspaceFolder, worktreeName);
     };
@@ -105,7 +125,19 @@ function setupWorktreeWindowIdentity(context: vscode.ExtensionContext): void {
     void updateWindowIdentity();
 
     context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration(WORKTREE_IDENTITY_MODE_SETTING)) {
+                void updateWindowIdentity();
+            }
+        })
+    );
+    context.subscriptions.push(
         vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            void updateWindowIdentity();
+        })
+    );
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor(() => {
             void updateWindowIdentity();
         })
     );
@@ -114,6 +146,11 @@ function setupWorktreeWindowIdentity(context: vscode.ExtensionContext): void {
             void updateWindowIdentity();
         })
     );
+}
+
+function getWorktreeIdentityMode(): WorktreeIdentityMode {
+    const config = vscode.workspace.getConfiguration('pythonCopyQualifiedName');
+    return config.get<WorktreeIdentityMode>('worktreeIdentity.mode', 'workspaceSettings');
 }
 
 function getPreferredWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
@@ -213,6 +250,14 @@ async function updateWindowTitleColors(
         },
         vscode.ConfigurationTarget.Workspace
     );
+}
+
+function updateWorktreeStatusBarItem(statusBarItem: vscode.StatusBarItem, worktreeName: string): void {
+    statusBarItem.text = `$(git-branch) ${worktreeName}`;
+    statusBarItem.tooltip = `Worktree: ${worktreeName}`;
+    statusBarItem.color = undefined;
+    statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    statusBarItem.show();
 }
 
 function buildTitleBarColorCustomizations(

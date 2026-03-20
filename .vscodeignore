@@ -5,3 +5,4 @@ node_modules
 *.vsix
 *.pyc
 __pycache__
+build-apk-and-upload.sh
