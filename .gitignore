@@ -3,3 +3,4 @@ out
 *.vsix
 *.pyc
 __pycache__
+.venv

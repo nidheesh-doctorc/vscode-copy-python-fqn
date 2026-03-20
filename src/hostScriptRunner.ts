@@ -33,6 +33,19 @@ interface TaskRunResult {
     error: string;
 }
 
+interface TaskOutputStreamEvent {
+    type: 'stdout' | 'stderr';
+    data: string;
+}
+
+interface TaskExitStreamEvent {
+    type: 'exit';
+    success: boolean;
+    exitCode: number;
+}
+
+type TaskStreamEvent = TaskOutputStreamEvent | TaskExitStreamEvent;
+
 interface ResolvedTaskOptions {
     cwd?: string;
     env?: Record<string, string>;
@@ -78,6 +91,49 @@ function httpRequest(
             req.setHeader('Content-Length', Buffer.byteLength(body));
             req.write(body);
         }
+        req.end();
+    });
+}
+
+function httpRequestStream(
+    method: 'GET' | 'POST',
+    host: string,
+    port: number,
+    urlPath: string,
+    onData: (chunk: string) => void,
+    body?: string
+): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+        const req = http.request({ method, hostname: host, port, path: urlPath, timeout: 120_000 }, (res) => {
+            const status = res.statusCode ?? 0;
+            let bufferedBody = '';
+            res.setEncoding('utf8');
+
+            res.on('data', (chunk: string) => {
+                if (status === 200) {
+                    onData(chunk);
+                    return;
+                }
+                bufferedBody += chunk;
+            });
+
+            res.on('end', () => {
+                resolve({ status, body: bufferedBody });
+            });
+        });
+
+        req.on('error', reject);
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Request timed out'));
+        });
+
+        if (body) {
+            req.setHeader('Content-Type', 'application/json');
+            req.setHeader('Content-Length', Buffer.byteLength(body));
+            req.write(body);
+        }
+
         req.end();
     });
 }
@@ -245,6 +301,132 @@ export class HostScriptRunner implements vscode.Disposable {
             return JSON.parse(res.body) as TaskRunResult;
         } catch (err) {
             this.logDebug(`[runTask] Request failed: ${String(err)}`);
+            return {
+                success: false,
+                exitCode: -1,
+                output: '',
+                error: `Cannot reach host server at ${this.baseUrl}. Is it running? (${err})`
+            };
+        }
+    }
+
+    public async runTaskStreaming(
+        label: string,
+        onEvent: (event: TaskStreamEvent) => void,
+        args: string[] = [],
+        inputs?: Record<string, string>,
+        resolvedCommand?: string,
+        resolvedArgs?: string[],
+        resolvedEnv?: Record<string, string>,
+        resolvedCwd?: string
+    ): Promise<TaskRunResult> {
+        const workspace = this.getWorkspacePath();
+        if (!workspace) {
+            this.logDebug(`[runTaskStreaming] Cannot run '${label}' because no workspace folder is open.`);
+            return {
+                success: false,
+                exitCode: -1,
+                output: '',
+                error: 'No workspace folder open'
+            };
+        }
+
+        const result: TaskRunResult = {
+            success: false,
+            exitCode: -1,
+            output: '',
+            error: ''
+        };
+
+        try {
+            const payload: Record<string, unknown> = { workspace, label, args, inputs: inputs ?? {} };
+            if (resolvedCommand) {
+                payload.resolvedCommand = resolvedCommand;
+            }
+            if (resolvedArgs) {
+                payload.resolvedArgs = resolvedArgs;
+            }
+            if (resolvedEnv) {
+                payload.resolvedEnv = resolvedEnv;
+            }
+            if (resolvedCwd) {
+                payload.resolvedCwd = resolvedCwd;
+            }
+
+            const body = JSON.stringify(payload);
+            let pendingLine = '';
+
+            this.logDebug(`[runTaskStreaming] label=${label} workspace=${workspace}`);
+            this.logDebug(`[runTaskStreaming] payload=${body}`);
+
+            const processLine = (line: string): void => {
+                const trimmed = line.trim();
+                if (!trimmed) {
+                    return;
+                }
+
+                const event = JSON.parse(trimmed) as TaskStreamEvent;
+                this.logDebug(`[runTaskStreaming] event=${trimmed}`);
+                if (event.type === 'stdout') {
+                    result.output += event.data;
+                } else if (event.type === 'stderr') {
+                    result.error += event.data;
+                } else if (event.type === 'exit') {
+                    result.success = event.success;
+                    result.exitCode = event.exitCode;
+                }
+                onEvent(event);
+            };
+
+            const res = await httpRequestStream(
+                'POST',
+                this.host,
+                this.port,
+                '/run-stream',
+                (chunk) => {
+                    pendingLine += chunk;
+                    let newlineIndex = pendingLine.indexOf('\n');
+                    while (newlineIndex >= 0) {
+                        const line = pendingLine.slice(0, newlineIndex);
+                        pendingLine = pendingLine.slice(newlineIndex + 1);
+                        processLine(line);
+                        newlineIndex = pendingLine.indexOf('\n');
+                    }
+                },
+                body
+            );
+
+            this.logDebug(`[runTaskStreaming] response status=${res.status}`);
+            if (res.status !== 200) {
+                this.logDebug(`[runTaskStreaming] response body=${res.body}`);
+                if (res.status === 404) {
+                    const data = JSON.parse(res.body) as { error?: string };
+                    return {
+                        success: false,
+                        exitCode: -1,
+                        output: '',
+                        error: data.error ?? `Task '${label}' not found on host`
+                    };
+                }
+                return {
+                    success: false,
+                    exitCode: -1,
+                    output: '',
+                    error: `Host server returned status ${res.status}`
+                };
+            }
+
+            if (pendingLine.trim()) {
+                processLine(pendingLine);
+            }
+
+            if (result.exitCode === -1 && !result.success) {
+                result.error = result.error || 'Host task stream ended without an exit event';
+            }
+
+            return result;
+        } catch (err) {
+            this.logDebug(`[runTaskStreaming] Request failed: ${String(err)}`);
             return {
                 success: false,
                 exitCode: -1,
@@ -817,8 +999,31 @@ class HostScriptTerminal implements vscode.Pseudoterminal {
         }
         this.writeEmitter.fire('---\r\n');
 
-        const result = await this.runner.runTask(
+        let wroteStdout = false;
+        let wroteStderr = false;
+        const writeTerminalChunk = (chunk: string): void => {
+            this.writeEmitter.fire(chunk.replace(/\n/g, '\r\n'));
+        };
+
+        const result = await this.runner.runTaskStreaming(
             this.label,
+            (event) => {
+                if (event.type === 'stdout') {
+                    wroteStdout = true;
+                    writeTerminalChunk(event.data);
+                    return;
+                }
+
+                if (event.type === 'exit') {
+                    return;
+                }
+
+                if (!wroteStderr) {
+                    this.writeEmitter.fire('\r\n--- stderr ---\r\n');
+                    wroteStderr = true;
+                }
+                writeTerminalChunk(event.data);
+            },
             [],
             resolvedInputs,
             command,
@@ -827,10 +1032,10 @@ class HostScriptTerminal implements vscode.Pseudoterminal {
             resolvedOptions?.cwd
         );
 
-        if (result.output) {
+        if (result.output && !wroteStdout) {
             this.writeEmitter.fire(result.output.replace(/\n/g, '\r\n'));
         }
-        if (result.error) {
+        if (result.error && !wroteStderr) {
             this.writeEmitter.fire('\r\n--- stderr ---\r\n');
             this.writeEmitter.fire(result.error.replace(/\n/g, '\r\n'));
         }

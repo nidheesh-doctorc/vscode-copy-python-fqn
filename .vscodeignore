@@ -1,0 +1,7 @@
+**/*.ts
+**/tsconfig.json
+.venv
+node_modules
+*.vsix
+*.pyc
+__pycache__

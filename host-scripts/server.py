@@ -10,6 +10,7 @@ Endpoints:
     GET  /health                          — liveness check
     POST /tasks   {"workspace": "..."}    — list host tasks for a workspace
     POST /run     {"workspace": "...", "label": "Host: ...", "args": [...]}
+    POST /run-stream {"workspace": "...", "label": "Host: ...", "args": [...]}
 
 Usage:
     python3 host-scripts/server.py [--port 7890]
@@ -18,8 +19,10 @@ Usage:
 import argparse
 import json
 import os
+import queue
 import re
 import subprocess
+import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -138,7 +141,7 @@ def expand_task_value(
     return replace_env_patterns(expanded, env)
 
 
-def run_task(
+def prepare_task_execution(
     task: dict,
     extra_args: list[str],
     workspace: str,
@@ -147,8 +150,8 @@ def run_task(
     resolved_args: list[str] | None = None,
     resolved_env: dict[str, str] | None = None,
     resolved_cwd: str | None = None,
-) -> dict:
-    """Execute a task's shell command on the host and return the result."""
+) -> tuple[bool, list[str] | str, str, dict[str, str]]:
+    """Resolve a task into subprocess arguments, cwd, and environment."""
     options = task.get("options", {})
     cwd = resolved_cwd if resolved_cwd is not None else options.get("cwd", workspace)
     env = os.environ.copy()
@@ -175,15 +178,19 @@ def run_task(
         cwd = str(resolved_cwd)
 
     if resolved_command:
-        # Extension resolved command/args already.
         if resolved_args is not None:
-            command_argv = [resolved_command, *resolved_args, *extra_args]
-            command_argv = [expand_task_value(str(part), workspace, env, inputs) for part in command_argv]
+            command_spec = [resolved_command, *resolved_args, *extra_args]
+            command_spec = [
+                expand_task_value(str(part), workspace, env, inputs)
+                for part in command_spec
+            ]
             print("  Using resolved argv from extension")
-            print(f"  Argv: {command_argv}")
+            print(f"  Argv: {command_spec}")
+            use_shell = False
         else:
-            full_command = expand_task_value(str(resolved_command), workspace, env, inputs)
+            command_spec = expand_task_value(str(resolved_command), workspace, env, inputs)
             print("  Using resolved command from extension")
+            use_shell = True
     else:
         command = task.get("command", "")
         task_args = task.get("args", [])
@@ -193,38 +200,173 @@ def run_task(
         extra_args = [expand_task_value(str(arg), workspace, env, inputs) for arg in extra_args]
 
         parts = [command] + task_args + extra_args
-        full_command = " ".join(parts)
+        command_spec = " ".join(parts)
+        use_shell = True
 
     print(f"  Cwd: {cwd}")
     print(f"  Env after resolution: { {k: env[k] for k in sorted(env_vars.keys())} }")
 
-    if not (resolved_command and resolved_args is not None):
-        full_command = full_command.replace("${workspaceFolder}", workspace)
-        print(f"  Command: {full_command}")
+    if use_shell:
+        command_spec = str(command_spec).replace("${workspaceFolder}", workspace)
+        print(f"  Command: {command_spec}")
 
+    return use_shell, command_spec, cwd, env
+
+
+def stream_task(
+    task: dict,
+    extra_args: list[str],
+    workspace: str,
+    emit_event,
+    inputs: dict[str, str] | None = None,
+    resolved_command: str | None = None,
+    resolved_args: list[str] | None = None,
+    resolved_env: dict[str, str] | None = None,
+    resolved_cwd: str | None = None,
+) -> dict:
+    """Execute a task and emit output events as data arrives."""
+    use_shell, command_spec, cwd, env = prepare_task_execution(
+        task,
+        extra_args,
+        workspace,
+        inputs,
+        resolved_command,
+        resolved_args,
+        resolved_env,
+        resolved_cwd,
+    )
+    timeout = 1200
+    event_queue: queue.Queue[dict] = queue.Queue()
+    proc = None
+
+    def read_stream(stream_name: str, stream) -> None:
+        try:
+            for chunk in iter(stream.readline, ""):
+                if chunk:
+                    event_queue.put({"type": stream_name, "data": chunk})
+        finally:
+            if stream is not None:
+                stream.close()
+            event_queue.put({"type": "stream-closed", "stream": stream_name})
+
+    try:
+        proc = subprocess.Popen(
+            command_spec,
+            shell=use_shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=cwd,
+            env=env,
+        )
+
+        stdout_thread = threading.Thread(
+            target=read_stream,
+            args=("stdout", proc.stdout),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=read_stream,
+            args=("stderr", proc.stderr),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        deadline = time.monotonic() + timeout
+        open_streams = 2
+        while open_streams > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command_spec, timeout)
+            try:
+                event = event_queue.get(timeout=min(0.1, remaining))
+            except queue.Empty:
+                continue
+
+            if event["type"] == "stream-closed":
+                open_streams -= 1
+                continue
+
+            emit_event(event)
+
+        exit_code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        result = {
+            "success": exit_code == 0,
+            "exitCode": exit_code,
+            "output": "",
+            "error": "",
+        }
+        emit_event(
+            {
+                "type": "exit",
+                "success": result["success"],
+                "exitCode": result["exitCode"],
+            }
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        timeout_message = f"Task timed out after {timeout}s"
+        emit_event({"type": "stderr", "data": f"{timeout_message}\n"})
+        emit_event({"type": "exit", "success": False, "exitCode": -1})
+        return {
+            "success": False,
+            "exitCode": -1,
+            "output": "",
+            "error": timeout_message,
+        }
+    except Exception as e:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        error_message = str(e)
+        emit_event({"type": "stderr", "data": f"{error_message}\n"})
+        emit_event({"type": "exit", "success": False, "exitCode": -1})
+        return {
+            "success": False,
+            "exitCode": -1,
+            "output": "",
+            "error": error_message,
+        }
+
+
+def run_task(
+    task: dict,
+    extra_args: list[str],
+    workspace: str,
+    inputs: dict[str, str] | None = None,
+    resolved_command: str | None = None,
+    resolved_args: list[str] | None = None,
+    resolved_env: dict[str, str] | None = None,
+    resolved_cwd: str | None = None,
+) -> dict:
+    """Execute a task's shell command on the host and return the result."""
+    use_shell, command_spec, cwd, env = prepare_task_execution(
+        task,
+        extra_args,
+        workspace,
+        inputs,
+        resolved_command,
+        resolved_args,
+        resolved_env,
+        resolved_cwd,
+    )
     timeout = 1200
 
     try:
-        if resolved_command and resolved_args is not None:
-            proc = subprocess.run(
-                command_argv,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=cwd,
-                env=env,
-            )
-        else:
-            proc = subprocess.run(
-                full_command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=cwd,
-                env=env,
-            )
+        proc = subprocess.run(
+            command_spec,
+            shell=use_shell,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+        )
         return {
             "success": proc.returncode == 0,
             "exitCode": proc.returncode,
@@ -248,6 +390,8 @@ def run_task(
 
 
 class TaskHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, format, *args):
         timestamp = time.strftime("%H:%M:%S")
         print(f"  [{timestamp}] {format % args}")
@@ -282,6 +426,93 @@ class TaskHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": f"Workspace not found: {workspace}"})
             return None
         return resolved
+
+    def _parse_run_request(self, request: dict) -> dict | None:
+        workspace = self._get_workspace(request)
+        if workspace is None:
+            return None
+
+        label = request.get("label", "")
+        extra_args = request.get("args", [])
+        input_values = request.get("inputs", {})
+        resolved_command = request.get("resolvedCommand", None)
+        resolved_args = request.get("resolvedArgs", None)
+        resolved_env = request.get("resolvedEnv", None)
+        resolved_cwd = request.get("resolvedCwd", None)
+
+        if not label:
+            self._send_json(400, {"error": "'label' is required"})
+            return None
+
+        if not isinstance(extra_args, list) or not all(isinstance(a, str) for a in extra_args):
+            self._send_json(400, {"error": "'args' must be an array of strings"})
+            return None
+
+        if not isinstance(input_values, dict):
+            self._send_json(400, {"error": "'inputs' must be an object"})
+            return None
+
+        if resolved_args is not None and (
+            not isinstance(resolved_args, list)
+            or not all(isinstance(a, str) for a in resolved_args)
+        ):
+            self._send_json(400, {"error": "'resolvedArgs' must be an array of strings"})
+            return None
+
+        if resolved_env is not None and (
+            not isinstance(resolved_env, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in resolved_env.items())
+        ):
+            self._send_json(400, {"error": "'resolvedEnv' must be an object of string values"})
+            return None
+
+        if resolved_cwd is not None and not isinstance(resolved_cwd, str):
+            self._send_json(400, {"error": "'resolvedCwd' must be a string"})
+            return None
+
+        tasks, _ = load_host_tasks(workspace)
+        task = next((t for t in tasks if t["label"] == label), None)
+        if not task:
+            available = [t["label"] for t in tasks]
+            self._send_json(
+                404,
+                {
+                    "error": f"Task '{label}' not found in {workspace}",
+                    "available": available,
+                },
+            )
+            return None
+
+        return {
+            "workspace": workspace,
+            "label": label,
+            "extra_args": extra_args,
+            "input_values": input_values,
+            "resolved_command": resolved_command,
+            "resolved_args": resolved_args,
+            "resolved_env": resolved_env,
+            "resolved_cwd": resolved_cwd,
+            "task": task,
+        }
+
+    def _log_run_request(self, run_request: dict) -> None:
+        short_ws = os.path.basename(run_request["workspace"])
+        print(f"  Running: [{short_ws}] {run_request['label']}")
+        if run_request["resolved_command"]:
+            print("  resolvedCommand provided by extension")
+        if run_request["resolved_args"] is not None:
+            print(f"  resolvedArgs: {run_request['resolved_args']}")
+        if run_request["resolved_cwd"] is not None:
+            print(f"  resolvedCwd: {run_request['resolved_cwd']}")
+        if run_request["resolved_env"] is not None:
+            print(f"  resolvedEnv keys: {sorted(run_request['resolved_env'].keys())}")
+        elif run_request["input_values"]:
+            print(f"  inputs: {run_request['input_values']}")
+
+    def _send_stream_event(self, event: dict) -> None:
+        payload = json.dumps(event).encode("utf-8") + b"\n"
+        self.wfile.write(payload)
+        self.wfile.flush()
 
     def do_GET(self):
         if self.path == "/health":
@@ -322,90 +553,55 @@ class TaskHandler(BaseHTTPRequestHandler):
             request = self._read_json_body()
             if request is None:
                 return
-            workspace = self._get_workspace(request)
-            if workspace is None:
+            run_request = self._parse_run_request(request)
+            if run_request is None:
                 return
 
-            label = request.get("label", "")
-            extra_args = request.get("args", [])
-            input_values = request.get("inputs", {})
-            resolved_command = request.get("resolvedCommand", None)
-            resolved_args = request.get("resolvedArgs", None)
-            resolved_env = request.get("resolvedEnv", None)
-            resolved_cwd = request.get("resolvedCwd", None)
-
-            if not label:
-                self._send_json(400, {"error": "'label' is required"})
-                return
-
-            if not isinstance(extra_args, list) or not all(
-                isinstance(a, str) for a in extra_args
-            ):
-                self._send_json(400, {"error": "'args' must be an array of strings"})
-                return
-
-            if not isinstance(input_values, dict):
-                self._send_json(400, {"error": "'inputs' must be an object"})
-                return
-
-            if resolved_args is not None and (
-                not isinstance(resolved_args, list)
-                or not all(isinstance(a, str) for a in resolved_args)
-            ):
-                self._send_json(400, {"error": "'resolvedArgs' must be an array of strings"})
-                return
-
-            if resolved_env is not None and (
-                not isinstance(resolved_env, dict)
-                or not all(isinstance(k, str) and isinstance(v, str) for k, v in resolved_env.items())
-            ):
-                self._send_json(400, {"error": "'resolvedEnv' must be an object of string values"})
-                return
-
-            if resolved_cwd is not None and not isinstance(resolved_cwd, str):
-                self._send_json(400, {"error": "'resolvedCwd' must be a string"})
-                return
-
-            tasks, _ = load_host_tasks(workspace)
-            task = next((t for t in tasks if t["label"] == label), None)
-
-            if not task:
-                available = [t["label"] for t in tasks]
-                self._send_json(
-                    404,
-                    {
-                        "error": f"Task '{label}' not found in {workspace}",
-                        "available": available,
-                    },
-                )
-                return
-
-            short_ws = os.path.basename(workspace)
-            print(f"  Running: [{short_ws}] {label}")
-            if resolved_command:
-                print("  resolvedCommand provided by extension")
-            if resolved_args is not None:
-                print(f"  resolvedArgs: {resolved_args}")
-            if resolved_cwd is not None:
-                print(f"  resolvedCwd: {resolved_cwd}")
-            if resolved_env is not None:
-                print(f"  resolvedEnv keys: {sorted(resolved_env.keys())}")
-            elif input_values:
-                print(f"  inputs: {input_values}")
+            self._log_run_request(run_request)
             result = run_task(
-                task,
-                extra_args,
-                workspace,
-                input_values,
-                resolved_command,
-                resolved_args,
-                resolved_env,
-                resolved_cwd,
+                run_request["task"],
+                run_request["extra_args"],
+                run_request["workspace"],
+                run_request["input_values"],
+                run_request["resolved_command"],
+                run_request["resolved_args"],
+                run_request["resolved_env"],
+                run_request["resolved_cwd"],
             )
             status_text = "OK" if result["success"] else "FAILED"
             print(f"  [{status_text}] exit={result['exitCode']}")
 
             self._send_json(200, result)
+            return
+
+        if parsed.path == "/run-stream":
+            request = self._read_json_body()
+            if request is None:
+                return
+            run_request = self._parse_run_request(request)
+            if run_request is None:
+                return
+
+            self._log_run_request(run_request)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            result = stream_task(
+                run_request["task"],
+                run_request["extra_args"],
+                run_request["workspace"],
+                self._send_stream_event,
+                run_request["input_values"],
+                run_request["resolved_command"],
+                run_request["resolved_args"],
+                run_request["resolved_env"],
+                run_request["resolved_cwd"],
+            )
+            status_text = "OK" if result["success"] else "FAILED"
+            print(f"  [{status_text}] exit={result['exitCode']}")
             return
 
         self._send_json(404, {"error": "Not found"})
