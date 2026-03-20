@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.3.14",
+    "version": "1.3.18",
     "publisher": "DoctorC",
     "license": "MIT",
     "repository": {
@@ -16,6 +16,7 @@
         "Other"
     ],
     "activationEvents": [
+        "onStartupFinished",
         "onLanguage:python",
         "onTaskType:hostScript"
     ],

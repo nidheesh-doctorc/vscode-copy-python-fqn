@@ -129,7 +129,7 @@ The host task server starts automatically — **no manual steps required**. Add 
 - **`initializeCommand`** runs **on the host** every time the container starts. It downloads and starts the server.
 - **`remoteEnv`** passes the host-side workspace path into the container so the extension knows where to find `tasks.json` on the host.
 
-The script downloads `server.py` to `~/.local/share/vscode-host-task-server/`, starts it if not already running, and is idempotent — safe to call repeatedly. Logs go to `~/.local/share/vscode-host-task-server/server.log`.
+The script downloads `server.py` to `~/.local/share/vscode-host-task-server/`, starts it if not already running, and is idempotent — safe to call repeatedly. Logs go to `~/.local/share/vscode-host-task-server/server.log`, including full stdout/stderr streamed from host tasks.
 
 > **Why `initializeCommand`?** It's the only devcontainer lifecycle hook that runs on the host machine. All others (`postCreateCommand`, `postStartCommand`, etc.) run inside the container.
 
@@ -167,7 +167,8 @@ For task inputs, prefer `${hostInput:name}` inside `command` or `args`.
 
 - `${hostInput:name}` is resolved by this extension and prompts once.
 - `${input:name}` uses VS Code's built-in task input system and can prompt twice for `hostScript` tasks because the task engine and the custom runner both need the value.
-- `${env:NAME}` is expanded on the host using the host server process environment.
+- `${env:NAME}` is expanded on the host using the host environment, with variables hydrated from your interactive login shell so tool PATH setup matches a normal terminal session more closely.
+- Host tasks are non-interactive. The server disconnects stdin and disables Corepack's download confirmation prompt so commands like `pnpm` do not hang waiting for input.
 
 ```jsonc
 {

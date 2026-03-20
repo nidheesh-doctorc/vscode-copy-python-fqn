@@ -4,6 +4,8 @@ import * as fs from 'fs';
 import { PythonFileMonitor } from './fileMonitor';
 import { HostScriptRunner, registerHostScriptCommands } from './hostScriptRunner';
 
+const WORKTREE_TITLE_PREFIX = 'worktree';
+
 type DoctorCTestKind =
     | 'unit'
     | 'channels'
@@ -84,6 +86,255 @@ export function activate(context: vscode.ExtensionContext) {
     const hostScriptRunner = new HostScriptRunner();
     context.subscriptions.push(hostScriptRunner);
     registerHostScriptCommands(context, hostScriptRunner);
+
+    setupWorktreeWindowIdentity(context);
+}
+
+function setupWorktreeWindowIdentity(context: vscode.ExtensionContext): void {
+    const updateWindowIdentity = async (): Promise<void> => {
+        const workspaceFolder = getPreferredWorkspaceFolder();
+        if (!workspaceFolder) {
+            return;
+        }
+
+        const worktreeName = await resolveWorktreeName(workspaceFolder.uri.fsPath);
+        await updateWindowTitle(workspaceFolder, worktreeName);
+        await updateWindowTitleColors(workspaceFolder, worktreeName);
+    };
+
+    void updateWindowIdentity();
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            void updateWindowIdentity();
+        })
+    );
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveColorTheme(() => {
+            void updateWindowIdentity();
+        })
+    );
+}
+
+function getPreferredWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
+    const activeDocument = vscode.window.activeTextEditor?.document;
+    if (activeDocument) {
+        const activeFolder = vscode.workspace.getWorkspaceFolder(activeDocument.uri);
+        if (activeFolder) {
+            return activeFolder;
+        }
+    }
+
+    return vscode.workspace.workspaceFolders?.[0];
+}
+
+async function resolveWorktreeName(workspacePath: string): Promise<string> {
+    const gitPath = path.join(workspacePath, '.git');
+
+    try {
+        const gitStats = await fs.promises.stat(gitPath);
+
+        if (gitStats.isDirectory()) {
+            return path.basename(workspacePath);
+        }
+
+        if (gitStats.isFile()) {
+            const gitFileContent = await fs.promises.readFile(gitPath, 'utf8');
+            const gitDirPath = parseGitDirPath(gitFileContent, workspacePath);
+            if (gitDirPath) {
+                return path.basename(gitDirPath);
+            }
+        }
+    } catch {
+        // Fall back to the workspace folder name when Git metadata is unavailable.
+    }
+
+    return path.basename(workspacePath);
+}
+
+function parseGitDirPath(gitFileContent: string, workspacePath: string): string | null {
+    const gitDirPrefix = 'gitdir:';
+    const gitDirLine = gitFileContent
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find((line) => line.toLowerCase().startsWith(gitDirPrefix));
+
+    if (!gitDirLine) {
+        return null;
+    }
+
+    const rawGitDirPath = gitDirLine.slice(gitDirPrefix.length).trim();
+    if (!rawGitDirPath) {
+        return null;
+    }
+
+    return path.isAbsolute(rawGitDirPath)
+        ? rawGitDirPath
+        : path.resolve(workspacePath, rawGitDirPath);
+}
+
+async function updateWindowTitle(workspaceFolder: vscode.WorkspaceFolder, worktreeName: string): Promise<void> {
+    const title = `${WORKTREE_TITLE_PREFIX}: ${worktreeName}`;
+    const windowConfig = vscode.workspace.getConfiguration('window', workspaceFolder.uri);
+    const currentTitle = windowConfig.get<string>('title');
+
+    if (currentTitle === title) {
+        return;
+    }
+
+    await windowConfig.update('title', title, vscode.ConfigurationTarget.Workspace);
+}
+
+async function updateWindowTitleColors(
+    workspaceFolder: vscode.WorkspaceFolder,
+    worktreeName: string
+): Promise<void> {
+    const workbenchConfig = vscode.workspace.getConfiguration('workbench', workspaceFolder.uri);
+    const existingCustomizations = workbenchConfig.get<Record<string, unknown>>('colorCustomizations', {});
+    const titleBarColors = buildTitleBarColorCustomizations(worktreeName, vscode.window.activeColorTheme.kind);
+
+    let hasChanges = false;
+    for (const [key, value] of Object.entries(titleBarColors)) {
+        if (existingCustomizations[key] !== value) {
+            hasChanges = true;
+            break;
+        }
+    }
+
+    if (!hasChanges) {
+        return;
+    }
+
+    await workbenchConfig.update(
+        'colorCustomizations',
+        {
+            ...existingCustomizations,
+            ...titleBarColors
+        },
+        vscode.ConfigurationTarget.Workspace
+    );
+}
+
+function buildTitleBarColorCustomizations(
+    worktreeName: string,
+    themeKind: vscode.ColorThemeKind
+): Record<string, string> {
+    const hash = hashString(worktreeName.toLowerCase());
+    const hue = hash % 360;
+    const saturation = 58 + (hash % 14);
+    const activeLightness = themeKind === vscode.ColorThemeKind.Light ? 76 : 68;
+    const inactiveLightness = Math.min(activeLightness + 6, 84);
+    const activeBackground = hslToHex(hue, saturation, activeLightness);
+    const inactiveBackground = hslToHex(hue, Math.max(42, saturation - 10), inactiveLightness);
+
+    return {
+        'titleBar.activeBackground': activeBackground,
+        'titleBar.inactiveBackground': inactiveBackground,
+        'titleBar.activeForeground': getContrastingTextColor(activeBackground),
+        'titleBar.inactiveForeground': getContrastingTextColor(inactiveBackground)
+    };
+}
+
+function hashString(value: string): number {
+    let hash = 0;
+
+    for (let index = 0; index < value.length; index++) {
+        hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+    }
+
+    return Math.abs(hash);
+}
+
+function hslToHex(hue: number, saturation: number, lightness: number): string {
+    const normalizedSaturation = saturation / 100;
+    const normalizedLightness = lightness / 100;
+    const chroma = (1 - Math.abs(2 * normalizedLightness - 1)) * normalizedSaturation;
+    const hueSegment = hue / 60;
+    const secondComponent = chroma * (1 - Math.abs((hueSegment % 2) - 1));
+    const match = normalizedLightness - chroma / 2;
+
+    let red = 0;
+    let green = 0;
+    let blue = 0;
+
+    if (hueSegment >= 0 && hueSegment < 1) {
+        red = chroma;
+        green = secondComponent;
+    } else if (hueSegment < 2) {
+        red = secondComponent;
+        green = chroma;
+    } else if (hueSegment < 3) {
+        green = chroma;
+        blue = secondComponent;
+    } else if (hueSegment < 4) {
+        green = secondComponent;
+        blue = chroma;
+    } else if (hueSegment < 5) {
+        red = secondComponent;
+        blue = chroma;
+    } else {
+        red = chroma;
+        blue = secondComponent;
+    }
+
+    const toHex = (value: number): string => {
+        const normalizedValue = Math.round((value + match) * 255);
+        return normalizedValue.toString(16).padStart(2, '0');
+    };
+
+    return `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
+}
+
+function getContrastingTextColor(backgroundColor: string): string {
+    const rgb = hexToRgb(backgroundColor);
+    if (!rgb) {
+        return '#111827';
+    }
+
+    const darkText = '#111827';
+    const lightText = '#f8fafc';
+    const darkContrast = getContrastRatio(backgroundColor, darkText);
+    const lightContrast = getContrastRatio(backgroundColor, lightText);
+
+    return darkContrast >= lightContrast ? darkText : lightText;
+}
+
+function hexToRgb(color: string): { red: number; green: number; blue: number } | null {
+    const match = color.match(/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i);
+    if (!match) {
+        return null;
+    }
+
+    return {
+        red: parseInt(match[1], 16),
+        green: parseInt(match[2], 16),
+        blue: parseInt(match[3], 16)
+    };
+}
+
+function getContrastRatio(colorA: string, colorB: string): number {
+    const luminanceA = getRelativeLuminance(colorA);
+    const luminanceB = getRelativeLuminance(colorB);
+    const lighter = Math.max(luminanceA, luminanceB);
+    const darker = Math.min(luminanceA, luminanceB);
+
+    return (lighter + 0.05) / (darker + 0.05);
+}
+
+function getRelativeLuminance(color: string): number {
+    const rgb = hexToRgb(color);
+    if (!rgb) {
+        return 0;
+    }
+
+    const components = [rgb.red, rgb.green, rgb.blue].map((component) => {
+        const normalized = component / 255;
+        return normalized <= 0.03928
+            ? normalized / 12.92
+            : Math.pow((normalized + 0.055) / 1.055, 2.4);
+    });
+
+    return (0.2126 * components[0]) + (0.7152 * components[1]) + (0.0722 * components[2]);
 }
 
 function setupMethodTestRunner(context: vscode.ExtensionContext): void {

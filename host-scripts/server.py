@@ -19,9 +19,11 @@ Usage:
 import argparse
 import json
 import os
+import pwd
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -32,6 +34,87 @@ DEFAULT_PORT = 7890
 TASK_TYPE = "hostScript"
 INPUT_PATTERN = re.compile(r"\$\{(?:input|hostInput):([^}]+)\}")
 ENV_PATTERN = re.compile(r"\$\{env:([^}]+)\}")
+_INTERACTIVE_SHELL_ENV_CACHE: dict[str, str] | None = None
+_INTERACTIVE_SHELL_PATH_CACHE: str | None = None
+
+
+def log_server(message: str) -> None:
+    print(message, flush=True)
+
+
+def log_stream_chunk(prefix: str, chunk: str) -> None:
+    if not chunk:
+        return
+
+    for line in chunk.splitlines(keepends=True):
+        rendered = line.rstrip("\r\n")
+        if rendered:
+            sys.stdout.write(f"  [{prefix}] {rendered}\n")
+        else:
+            sys.stdout.write(f"  [{prefix}]\n")
+    sys.stdout.flush()
+
+
+def get_login_shell() -> str:
+    global _INTERACTIVE_SHELL_PATH_CACHE
+
+    if _INTERACTIVE_SHELL_PATH_CACHE:
+        return _INTERACTIVE_SHELL_PATH_CACHE
+
+    shell = os.environ.get("SHELL", "").strip()
+    if not shell:
+        try:
+            shell = pwd.getpwuid(os.getuid()).pw_shell
+        except Exception:
+            shell = ""
+
+    if not shell:
+        shell = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
+
+    _INTERACTIVE_SHELL_PATH_CACHE = shell
+    return shell
+
+
+def load_interactive_shell_environment() -> dict[str, str]:
+    global _INTERACTIVE_SHELL_ENV_CACHE
+
+    if _INTERACTIVE_SHELL_ENV_CACHE is not None:
+        return dict(_INTERACTIVE_SHELL_ENV_CACHE)
+
+    shell = get_login_shell()
+    try:
+        proc = subprocess.run(
+            [shell, "-ilc", "env -0"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        log_server(f"[env] Failed to read interactive shell environment from {shell}: {exc}")
+        _INTERACTIVE_SHELL_ENV_CACHE = {}
+        return {}
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        log_server(
+            f"[env] Interactive shell environment probe failed for {shell} "
+            f"with exit={proc.returncode}{': ' + stderr if stderr else ''}"
+        )
+        _INTERACTIVE_SHELL_ENV_CACHE = {}
+        return {}
+
+    parsed: dict[str, str] = {}
+    for entry in proc.stdout.split("\0"):
+        if not entry or "=" not in entry:
+            continue
+        key, value = entry.split("=", 1)
+        if key:
+            parsed[key] = value
+
+    log_server(f"[env] Loaded {len(parsed)} variable(s) from interactive login shell {shell}")
+    _INTERACTIVE_SHELL_ENV_CACHE = parsed
+    return dict(parsed)
 
 
 def strip_jsonc_comments(text: str) -> str:
@@ -155,14 +238,28 @@ def prepare_task_execution(
     options = task.get("options", {})
     cwd = resolved_cwd if resolved_cwd is not None else options.get("cwd", workspace)
     env = os.environ.copy()
+    interactive_shell_env = load_interactive_shell_environment()
+    if interactive_shell_env:
+        env.update(interactive_shell_env)
     env_vars = options.get("env", {})
+    login_shell = get_login_shell()
 
-    print(f"  Raw options.cwd: {options.get('cwd', None)}")
-    print(f"  Raw options.env: {env_vars}")
+    # Host tasks have no stdin bridge from VS Code, so force known prompt-driven
+    # tools into non-interactive mode where possible.
+    env.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+
+    log_server(f"  Raw options.cwd: {options.get('cwd', None)}")
+    log_server(f"  Raw options.env: {env_vars}")
+    log_server(f"  Login shell: {login_shell}")
+    log_server(f"  COREPACK_ENABLE_DOWNLOAD_PROMPT={env.get('COREPACK_ENABLE_DOWNLOAD_PROMPT')}")
+    if interactive_shell_env:
+        log_server(f"  Interactive shell env merged: {len(interactive_shell_env)} key(s)")
+    else:
+        log_server("  Interactive shell env merged: unavailable; using server process environment")
     if resolved_cwd is not None:
-        print(f"  resolvedCwd from extension: {resolved_cwd}")
+        log_server(f"  resolvedCwd from extension: {resolved_cwd}")
     if resolved_env is not None:
-        print(f"  resolvedEnv from extension: {resolved_env}")
+        log_server(f"  resolvedEnv from extension: {resolved_env}")
 
     for k, v in env_vars.items():
         env[k] = expand_task_value(str(v), workspace, env, inputs)
@@ -184,12 +281,12 @@ def prepare_task_execution(
                 expand_task_value(str(part), workspace, env, inputs)
                 for part in command_spec
             ]
-            print("  Using resolved argv from extension")
-            print(f"  Argv: {command_spec}")
+            log_server("  Using resolved argv from extension")
+            log_server(f"  Argv: {command_spec}")
             use_shell = False
         else:
             command_spec = expand_task_value(str(resolved_command), workspace, env, inputs)
-            print("  Using resolved command from extension")
+            log_server("  Using resolved command from extension")
             use_shell = True
     else:
         command = task.get("command", "")
@@ -203,14 +300,22 @@ def prepare_task_execution(
         command_spec = " ".join(parts)
         use_shell = True
 
-    print(f"  Cwd: {cwd}")
-    print(f"  Env after resolution: { {k: env[k] for k in sorted(env_vars.keys())} }")
+    log_server(f"  Cwd: {cwd}")
+    log_server(f"  Env after resolution: { {k: env[k] for k in sorted(env_vars.keys())} }")
 
     if use_shell:
-        command_spec = str(command_spec).replace("${workspaceFolder}", workspace)
-        print(f"  Command: {command_spec}")
+        command_text = str(command_spec).replace("${workspaceFolder}", workspace)
+        command_spec = [login_shell, "-ilc", command_text]
+        log_server("  Using interactive login shell command")
+        log_server(f"  Argv: {command_spec}")
+        use_shell = False
 
     return use_shell, command_spec, cwd, env
+
+
+def log_task_output(workspace: str, label: str, stream_name: str, chunk: str) -> None:
+    short_ws = os.path.basename(workspace)
+    log_stream_chunk(f"task:{short_ws}:{label}:{stream_name}", chunk)
 
 
 def stream_task(
@@ -243,6 +348,7 @@ def stream_task(
         try:
             for chunk in iter(stream.readline, ""):
                 if chunk:
+                    log_task_output(workspace, task.get("label", ""), stream_name, chunk)
                     event_queue.put({"type": stream_name, "data": chunk})
         finally:
             if stream is not None:
@@ -253,6 +359,7 @@ def stream_task(
         proc = subprocess.Popen(
             command_spec,
             shell=use_shell,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -361,12 +468,15 @@ def run_task(
         proc = subprocess.run(
             command_spec,
             shell=use_shell,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=cwd,
             env=env,
         )
+        log_task_output(workspace, task.get("label", ""), "stdout", proc.stdout)
+        log_task_output(workspace, task.get("label", ""), "stderr", proc.stderr)
         return {
             "success": proc.returncode == 0,
             "exitCode": proc.returncode,
@@ -394,7 +504,7 @@ class TaskHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         timestamp = time.strftime("%H:%M:%S")
-        print(f"  [{timestamp}] {format % args}")
+        log_server(f"  [{timestamp}] {format % args}")
 
     def _send_json(self, status: int, data: dict):
         body = json.dumps(data).encode("utf-8")
@@ -497,17 +607,17 @@ class TaskHandler(BaseHTTPRequestHandler):
 
     def _log_run_request(self, run_request: dict) -> None:
         short_ws = os.path.basename(run_request["workspace"])
-        print(f"  Running: [{short_ws}] {run_request['label']}")
+        log_server(f"  Running: [{short_ws}] {run_request['label']}")
         if run_request["resolved_command"]:
-            print("  resolvedCommand provided by extension")
+            log_server("  resolvedCommand provided by extension")
         if run_request["resolved_args"] is not None:
-            print(f"  resolvedArgs: {run_request['resolved_args']}")
+            log_server(f"  resolvedArgs: {run_request['resolved_args']}")
         if run_request["resolved_cwd"] is not None:
-            print(f"  resolvedCwd: {run_request['resolved_cwd']}")
+            log_server(f"  resolvedCwd: {run_request['resolved_cwd']}")
         if run_request["resolved_env"] is not None:
-            print(f"  resolvedEnv keys: {sorted(run_request['resolved_env'].keys())}")
+            log_server(f"  resolvedEnv keys: {sorted(run_request['resolved_env'].keys())}")
         elif run_request["input_values"]:
-            print(f"  inputs: {run_request['input_values']}")
+            log_server(f"  inputs: {run_request['input_values']}")
 
     def _send_stream_event(self, event: dict) -> None:
         payload = json.dumps(event).encode("utf-8") + b"\n"
