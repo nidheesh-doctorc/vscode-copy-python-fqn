@@ -499,6 +499,56 @@ def run_task(
         }
 
 
+def run_direct_command(
+    command: str,
+    workspace: str,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> dict:
+    synthetic_task = {
+        "label": "host-script",
+        "command": "",
+        "args": [],
+        "options": {},
+    }
+    return run_task(
+        synthetic_task,
+        [],
+        workspace,
+        None,
+        command,
+        None,
+        env,
+        cwd,
+    )
+
+
+def stream_direct_command(
+    command: str,
+    workspace: str,
+    emit_event,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> dict:
+    synthetic_task = {
+        "label": "host-script",
+        "command": "",
+        "args": [],
+        "options": {},
+    }
+    return stream_task(
+        synthetic_task,
+        [],
+        workspace,
+        emit_event,
+        None,
+        command,
+        None,
+        env,
+        cwd,
+    )
+
+
 class TaskHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -605,6 +655,37 @@ class TaskHandler(BaseHTTPRequestHandler):
             "task": task,
         }
 
+    def _parse_exec_request(self, request: dict) -> dict | None:
+        workspace = self._get_workspace(request)
+        if workspace is None:
+            return None
+
+        command = request.get("command", "")
+        env = request.get("env", None)
+        cwd = request.get("cwd", None)
+
+        if not isinstance(command, str) or not command.strip():
+            self._send_json(400, {"error": "'command' must be a non-empty string"})
+            return None
+
+        if env is not None and (
+            not isinstance(env, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+        ):
+            self._send_json(400, {"error": "'env' must be an object of string values"})
+            return None
+
+        if cwd is not None and not isinstance(cwd, str):
+            self._send_json(400, {"error": "'cwd' must be a string"})
+            return None
+
+        return {
+            "workspace": workspace,
+            "command": command,
+            "env": env,
+            "cwd": cwd,
+        }
+
     def _log_run_request(self, run_request: dict) -> None:
         short_ws = os.path.basename(run_request["workspace"])
         log_server(f"  Running: [{short_ws}] {run_request['label']}")
@@ -618,6 +699,14 @@ class TaskHandler(BaseHTTPRequestHandler):
             log_server(f"  resolvedEnv keys: {sorted(run_request['resolved_env'].keys())}")
         elif run_request["input_values"]:
             log_server(f"  inputs: {run_request['input_values']}")
+
+    def _log_exec_request(self, exec_request: dict) -> None:
+        short_ws = os.path.basename(exec_request["workspace"])
+        log_server(f"  Executing direct command: [{short_ws}] {exec_request['command']}")
+        if exec_request["cwd"] is not None:
+            log_server(f"  cwd: {exec_request['cwd']}")
+        if exec_request["env"] is not None:
+            log_server(f"  env keys: {sorted(exec_request['env'].keys())}")
 
     def _send_stream_event(self, event: dict) -> None:
         payload = json.dumps(event).encode("utf-8") + b"\n"
@@ -684,6 +773,27 @@ class TaskHandler(BaseHTTPRequestHandler):
             self._send_json(200, result)
             return
 
+        if parsed.path == "/exec":
+            request = self._read_json_body()
+            if request is None:
+                return
+            exec_request = self._parse_exec_request(request)
+            if exec_request is None:
+                return
+
+            self._log_exec_request(exec_request)
+            result = run_direct_command(
+                exec_request["command"],
+                exec_request["workspace"],
+                exec_request["env"],
+                exec_request["cwd"],
+            )
+            status_text = "OK" if result["success"] else "FAILED"
+            print(f"  [{status_text}] exit={result['exitCode']}")
+
+            self._send_json(200, result)
+            return
+
         if parsed.path == "/run-stream":
             request = self._read_json_body()
             if request is None:
@@ -709,6 +819,32 @@ class TaskHandler(BaseHTTPRequestHandler):
                 run_request["resolved_args"],
                 run_request["resolved_env"],
                 run_request["resolved_cwd"],
+            )
+            status_text = "OK" if result["success"] else "FAILED"
+            print(f"  [{status_text}] exit={result['exitCode']}")
+            return
+
+        if parsed.path == "/exec-stream":
+            request = self._read_json_body()
+            if request is None:
+                return
+            exec_request = self._parse_exec_request(request)
+            if exec_request is None:
+                return
+
+            self._log_exec_request(exec_request)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            result = stream_direct_command(
+                exec_request["command"],
+                exec_request["workspace"],
+                self._send_stream_event,
+                exec_request["env"],
+                exec_request["cwd"],
             )
             status_text = "OK" if result["success"] else "FAILED"
             print(f"  [{status_text}] exit={result['exitCode']}")

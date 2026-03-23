@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.3.21",
+    "version": "1.3.22",
     "publisher": "DoctorC",
     "license": "MIT",
     "repository": {
@@ -65,7 +65,7 @@
                         "Update the workspace window title and title bar colors by writing workspace settings.",
                         "Show the worktree identity in a session-only status bar item without modifying workspace files."
                     ],
-                    "default": "statusBar",
+                    "default": "workspaceSettings",
                     "scope": "machine",
                     "description": "Controls how worktree identity is shown. Use statusBar to avoid Git-visible workspace setting changes."
                 }

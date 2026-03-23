@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { PythonFileMonitor } from './fileMonitor';
 import { HostScriptRunner, registerHostScriptCommands } from './hostScriptRunner';
+import { installHostScriptCli } from './hostScriptCliInstaller';
 
 const WORKTREE_TITLE_PREFIX = 'worktree';
 const WORKTREE_IDENTITY_MODE_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.mode';
@@ -89,6 +90,7 @@ export function activate(context: vscode.ExtensionContext) {
     const hostScriptRunner = new HostScriptRunner();
     context.subscriptions.push(hostScriptRunner);
     registerHostScriptCommands(context, hostScriptRunner);
+    void installHostScriptCli(context);
 
     setupWorktreeWindowIdentity(context);
 }
@@ -256,8 +258,17 @@ function updateWorktreeStatusBarItem(statusBarItem: vscode.StatusBarItem, worktr
     statusBarItem.text = `$(git-branch) ${worktreeName}`;
     statusBarItem.tooltip = `Worktree: ${worktreeName}`;
     statusBarItem.color = undefined;
-    statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    statusBarItem.backgroundColor = getWorktreeStatusBarBackgroundColor(worktreeName);
     statusBarItem.show();
+}
+
+function getWorktreeStatusBarBackgroundColor(worktreeName: string): vscode.ThemeColor {
+    const hash = hashString(worktreeName.toLowerCase());
+    const themeColorId = (hash % 2) === 0
+        ? 'statusBarItem.warningBackground'
+        : 'statusBarItem.errorBackground';
+
+    return new vscode.ThemeColor(themeColorId);
 }
 
 function buildTitleBarColorCustomizations(

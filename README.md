@@ -28,6 +28,7 @@ A Visual Studio Code extension that adds a "Copy As Fully Qualified Name" option
 
 ### Host Task Runner (Devcontainer → Host)
 - **Run Host Commands**: Execute shell commands on the host machine from inside a devcontainer
+- **Direct CLI**: Use `host-script "..."` from the devcontainer shell to execute an arbitrary host command
 - **tasks.json Driven**: Uses `.vscode/tasks.json` — tasks with `"type": "hostScript"` run on the host
 - **Host Input Support**: Use `${hostInput:name}` in host tasks to prompt once for task parameters
 - **Env Variable Expansion**: `${env:NAME}` is expanded against the host environment before execution
@@ -135,6 +136,16 @@ The script downloads `server.py` to `~/.local/share/vscode-host-task-server/`, s
 
 The server is global — one process handles all workspaces and worktrees. The extension sends the workspace path with each request.
 
+When the extension activates, it also installs a small `host-script` wrapper into `~/.local/bin/host-script` inside the current environment. That wrapper talks directly to the host server, so from the devcontainer shell you can run:
+
+```bash
+host-script "docker-compose up -d"
+host-script "whoami"
+host-script 'echo ${env:USER}'
+```
+
+The CLI expands `${env:NAME}` and `${workspaceFolder}` locally before sending the command to the host server, then streams stdout/stderr back to your terminal.
+
 ##### Extension settings
 
 The extension auto-detects whether it's inside a devcontainer or on the host:
@@ -239,6 +250,22 @@ Example with a single prompt for a branch name:
 The `inputs` section still defines the prompt metadata. The difference is only the placeholder syntax used by the `hostScript` task.
 
 #### Triggering host tasks
+
+#### Direct host CLI
+
+For one-off commands that do not need a named `tasks.json` entry, use the installed CLI:
+
+```bash
+host-script "docker-compose up -d"
+host-script "whoami"
+host-script "cd ${workspaceFolder} && git status --short"
+```
+
+Behavior:
+
+- The CLI sends the current host workspace path from `HOST_PROJECT_PATH` when available, otherwise it falls back to the current working directory.
+- `${env:NAME}` placeholders are expanded in the devcontainer before the request is sent.
+- Output is streamed live from the host server back to the devcontainer terminal.
 
 **From an LLM agent** (inside the devcontainer), use the VS Code `run_task` tool:
 
