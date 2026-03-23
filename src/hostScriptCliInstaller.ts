@@ -14,13 +14,46 @@ function isPathDirectoryListed(targetDirectory: string): boolean {
     return pathEntries.includes(targetDirectory);
 }
 
+async function isWritableDirectory(targetDirectory: string): Promise<boolean> {
+    try {
+        const stats = await fs.promises.stat(targetDirectory);
+        if (!stats.isDirectory()) {
+            return false;
+        }
+
+        await fs.promises.access(targetDirectory, fs.constants.W_OK);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function resolveInstallDirectory(homeDirectory: string): Promise<string> {
+    const configuredDirectory = process.env.HOST_SCRIPT_INSTALL_DIR?.trim();
+    if (configuredDirectory) {
+        return configuredDirectory;
+    }
+
+    const fallbackDirectory = path.join(homeDirectory, '.local', 'bin');
+    const pathEntries = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+    const candidateDirectories = Array.from(new Set(['/usr/local/bin', ...pathEntries]));
+
+    for (const candidateDirectory of candidateDirectories) {
+        if (await isWritableDirectory(candidateDirectory)) {
+            return candidateDirectory;
+        }
+    }
+
+    return fallbackDirectory;
+}
+
 export async function installHostScriptCli(context: vscode.ExtensionContext): Promise<void> {
     const homeDirectory = os.homedir();
     if (!homeDirectory) {
         return;
     }
 
-    const installDirectory = process.env.HOST_SCRIPT_INSTALL_DIR?.trim() || path.join(homeDirectory, '.local', 'bin');
+    const installDirectory = await resolveInstallDirectory(homeDirectory);
     const cliEntryPath = path.join(context.extensionPath, 'out', 'hostScriptCli.js');
     const wrapperPath = path.join(installDirectory, CLI_NAME);
     const wrapperContent = [

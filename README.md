@@ -136,7 +136,7 @@ The script downloads `server.py` to `~/.local/share/vscode-host-task-server/`, s
 
 The server is global — one process handles all workspaces and worktrees. The extension sends the workspace path with each request.
 
-When the extension activates, it also installs a small `host-script` wrapper into `~/.local/bin/host-script` inside the current environment. That wrapper talks directly to the host server, so from the devcontainer shell you can run:
+When the extension activates, it also installs a small `host-script` wrapper into the first writable PATH directory it can use, preferring `/usr/local/bin/host-script` and falling back to `~/.local/bin/host-script`. That wrapper talks directly to the host server, so from the devcontainer shell you can run:
 
 ```bash
 host-script "docker-compose up -d"
