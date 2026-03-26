@@ -49,22 +49,19 @@ if [[ "${OLD_HASH}" != "${NEW_HASH}" ]]; then
 fi
 
 # Check if server is already listening
+SERVER_RUNNING=0
 if command -v curl &>/dev/null; then
     if curl -sf "http://localhost:${PORT}/health" &>/dev/null; then
-        if [[ "${SERVER_CHANGED}" -eq 0 ]]; then
-            echo "[host-task-server] Already running on port ${PORT}"
-            exit 0
-        fi
-        echo "[host-task-server] Server code changed; restarting existing server on port ${PORT}"
+        SERVER_RUNNING=1
     fi
 elif command -v nc &>/dev/null; then
     if nc -z localhost "${PORT}" 2>/dev/null; then
-        if [[ "${SERVER_CHANGED}" -eq 0 ]]; then
-            echo "[host-task-server] Already running on port ${PORT}"
-            exit 0
-        fi
-        echo "[host-task-server] Server code changed; restarting existing server on port ${PORT}"
+        SERVER_RUNNING=1
     fi
+fi
+
+if [[ "${SERVER_RUNNING}" -eq 1 ]]; then
+    echo "[host-task-server] Existing server detected on port ${PORT}; restarting"
 fi
 
 # Kill stale process if pid file exists
@@ -75,6 +72,27 @@ if [[ -f "${PID_FILE}" ]]; then
         sleep 0.5
     fi
     rm -f "${PID_FILE}"
+fi
+
+# If a previous server instance is still holding the port, stop it before launch.
+if command -v lsof &>/dev/null; then
+    PORT_PIDS="$(lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ -n "${PORT_PIDS}" ]]; then
+        echo "[host-task-server] Stopping existing listener(s) on port ${PORT}: ${PORT_PIDS//$'\n'/ }"
+        kill ${PORT_PIDS} 2>/dev/null || true
+        sleep 0.5
+
+        PORT_PIDS="$(lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null || true)"
+        if [[ -n "${PORT_PIDS}" ]]; then
+            kill -9 ${PORT_PIDS} 2>/dev/null || true
+            sleep 0.5
+        fi
+    fi
+fi
+
+if command -v lsof &>/dev/null && lsof -tiTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "[host-task-server] ERROR: port ${PORT} is still in use after restart attempt"
+    exit 1
 fi
 
 # Start server in background, fully detached from this shell session.

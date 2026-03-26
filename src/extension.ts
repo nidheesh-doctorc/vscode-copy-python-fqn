@@ -7,8 +7,9 @@ import { installHostScriptCli } from './hostScriptCliInstaller';
 
 const WORKTREE_TITLE_PREFIX = 'worktree';
 const WORKTREE_IDENTITY_MODE_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.mode';
+const WORKTREE_WINDOW_TITLE_TEMPLATE_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.windowTitleTemplate';
 
-type WorktreeIdentityMode = 'workspaceSettings' | 'statusBar';
+type WorktreeIdentityMode = 'workspaceSettings' | 'statusBar' | 'off';
 
 type DoctorCTestKind =
     | 'unit'
@@ -111,8 +112,14 @@ function setupWorktreeWindowIdentity(context: vscode.ExtensionContext): void {
             return;
         }
 
-        const worktreeName = await resolveWorktreeName(workspaceFolder.uri.fsPath);
         const mode = getWorktreeIdentityMode();
+
+        if (mode === 'off') {
+            statusBarItem.hide();
+            return;
+        }
+
+        const worktreeName = await resolveWorktreeName(workspaceFolder.uri.fsPath);
 
         if (mode === 'statusBar') {
             updateWorktreeStatusBarItem(statusBarItem, worktreeName);
@@ -128,7 +135,10 @@ function setupWorktreeWindowIdentity(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((event) => {
-            if (event.affectsConfiguration(WORKTREE_IDENTITY_MODE_SETTING)) {
+            if (
+                event.affectsConfiguration(WORKTREE_IDENTITY_MODE_SETTING)
+                || event.affectsConfiguration(WORKTREE_WINDOW_TITLE_TEMPLATE_SETTING)
+            ) {
                 void updateWindowIdentity();
             }
         })
@@ -213,7 +223,7 @@ function parseGitDirPath(gitFileContent: string, workspacePath: string): string 
 }
 
 async function updateWindowTitle(workspaceFolder: vscode.WorkspaceFolder, worktreeName: string): Promise<void> {
-    const title = `${WORKTREE_TITLE_PREFIX}: ${worktreeName}`;
+    const title = getWindowTitleTemplate().replace(/\$\{worktreeName\}/g, worktreeName);
     const windowConfig = vscode.workspace.getConfiguration('window', workspaceFolder.uri);
     const currentTitle = windowConfig.get<string>('title');
 
@@ -222,6 +232,11 @@ async function updateWindowTitle(workspaceFolder: vscode.WorkspaceFolder, worktr
     }
 
     await windowConfig.update('title', title, vscode.ConfigurationTarget.Workspace);
+}
+
+function getWindowTitleTemplate(): string {
+    const config = vscode.workspace.getConfiguration('pythonCopyQualifiedName');
+    return config.get<string>('worktreeIdentity.windowTitleTemplate', `${WORKTREE_TITLE_PREFIX}: ${'${worktreeName}'}`);
 }
 
 async function updateWindowTitleColors(
