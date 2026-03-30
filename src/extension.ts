@@ -293,27 +293,35 @@ function buildTitleBarColorCustomizations(
     const hash = hashString(worktreeName.toLowerCase());
     const hue = hash % 360;
     const saturation = 58 + (hash % 14);
-    const activeLightness = themeKind === vscode.ColorThemeKind.Light ? 76 : 68;
-    const inactiveLightness = Math.min(activeLightness + 6, 84);
+    const activeLightness = themeKind === vscode.ColorThemeKind.Light ? 46 : 38;
+    // const inactiveLightness = Math.min(activeLightness + 6, 84);
     const activeBackground = hslToHex(hue, saturation, activeLightness);
-    const inactiveBackground = hslToHex(hue, Math.max(42, saturation - 10), inactiveLightness);
+    // const inactiveBackground = hslToHex(hue, Math.max(42, saturation - 10), inactiveLightness);
 
     return {
         'titleBar.activeBackground': activeBackground,
-        'titleBar.inactiveBackground': inactiveBackground,
-        'titleBar.activeForeground': getContrastingTextColor(activeBackground),
-        'titleBar.inactiveForeground': getContrastingTextColor(inactiveBackground)
+        // 'titleBar.inactiveBackground': inactiveBackground,
+        'commandCenter.foreground': getContrastingTextColor(activeBackground),
+        // 'titleBar.inactiveForeground': getContrastingTextColor(inactiveBackground)
     };
 }
 
 function hashString(value: string): number {
-    let hash = 0;
+    let hash = 0x811c9dc5;
 
     for (let index = 0; index < value.length; index++) {
-        hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193);
     }
 
-    return Math.abs(hash);
+    hash ^= value.length;
+    hash ^= hash >>> 16;
+    hash = Math.imul(hash, 0x85ebca6b);
+    hash ^= hash >>> 13;
+    hash = Math.imul(hash, 0xc2b2ae35);
+    hash ^= hash >>> 16;
+
+    return hash >>> 0;
 }
 
 function hslToHex(hue: number, saturation: number, lightness: number): string {

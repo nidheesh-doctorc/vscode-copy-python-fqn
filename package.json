@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.3.24",
+    "version": "1.3.26",
     "publisher": "DoctorC",
     "license": "MIT",
     "repository": {
@@ -73,9 +73,9 @@
                 },
                 "pythonCopyQualifiedName.worktreeIdentity.windowTitleTemplate": {
                     "type": "string",
-                    "default": "worktree: ${worktreeName}",
+                    "default": "worktree: ${worktreeName} / ${activeRepositoryBranchName}",
                     "scope": "machine",
-                    "description": "Template used for the VS Code window title when worktree identity mode is workspaceSettings. Supports the ${worktreeName} placeholder."
+                    "description": "Template used for the VS Code window title when worktree identity mode is workspaceSettings. Supports the additional ${worktreeName} placeholder."
                 }
             }
         },

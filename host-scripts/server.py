@@ -28,14 +28,15 @@ import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Optional, Union
 from urllib.parse import urlparse
 
 DEFAULT_PORT = 7890
 TASK_TYPE = "hostScript"
 INPUT_PATTERN = re.compile(r"\$\{(?:input|hostInput):([^}]+)\}")
 ENV_PATTERN = re.compile(r"\$\{env:([^}]+)\}")
-_INTERACTIVE_SHELL_ENV_CACHE: dict[str, str] | None = None
-_INTERACTIVE_SHELL_PATH_CACHE: str | None = None
+_INTERACTIVE_SHELL_ENV_CACHE: Optional[dict[str, str]] = None
+_INTERACTIVE_SHELL_PATH_CACHE: Optional[str] = None
 
 
 def log_server(message: str) -> None:
@@ -167,7 +168,7 @@ def strip_jsonc_comments(text: str) -> str:
     return cleaned
 
 
-def validate_workspace(workspace: str) -> str | None:
+def validate_workspace(workspace: str) -> Optional[str]:
     """Validate workspace path is a real directory. Returns resolved path or None."""
     resolved = os.path.realpath(os.path.expanduser(workspace))
     if not os.path.isdir(resolved):
@@ -200,7 +201,7 @@ def load_host_tasks(workspace: str) -> tuple[list[dict], list[dict]]:
     return host_tasks, inputs
 
 
-def replace_input_patterns(value: str, inputs: dict[str, str] | None) -> str:
+def replace_input_patterns(value: str, inputs: Optional[dict[str, str]]) -> str:
     """Replace ${input:NAME} and ${hostInput:NAME} placeholders."""
     if not inputs:
         return value
@@ -216,7 +217,7 @@ def expand_task_value(
     value: str,
     workspace: str,
     env: dict[str, str],
-    inputs: dict[str, str] | None = None,
+    inputs: Optional[dict[str, str]] = None,
 ) -> str:
     """Expand VS Code-style placeholders used by host tasks."""
     expanded = value.replace("${workspaceFolder}", workspace)
@@ -228,12 +229,12 @@ def prepare_task_execution(
     task: dict,
     extra_args: list[str],
     workspace: str,
-    inputs: dict[str, str] | None = None,
-    resolved_command: str | None = None,
-    resolved_args: list[str] | None = None,
-    resolved_env: dict[str, str] | None = None,
-    resolved_cwd: str | None = None,
-) -> tuple[bool, list[str] | str, str, dict[str, str]]:
+    inputs: Optional[dict[str, str]] = None,
+    resolved_command: Optional[str] = None,
+    resolved_args: Optional[list[str]] = None,
+    resolved_env: Optional[dict[str, str]] = None,
+    resolved_cwd: Optional[str] = None,
+) -> tuple[bool, Union[list[str], str], str, dict[str, str]]:
     """Resolve a task into subprocess arguments, cwd, and environment."""
     options = task.get("options", {})
     cwd = resolved_cwd if resolved_cwd is not None else options.get("cwd", workspace)
@@ -323,11 +324,11 @@ def stream_task(
     extra_args: list[str],
     workspace: str,
     emit_event,
-    inputs: dict[str, str] | None = None,
-    resolved_command: str | None = None,
-    resolved_args: list[str] | None = None,
-    resolved_env: dict[str, str] | None = None,
-    resolved_cwd: str | None = None,
+    inputs: Optional[dict[str, str]] = None,
+    resolved_command: Optional[str] = None,
+    resolved_args: Optional[list[str]] = None,
+    resolved_env: Optional[dict[str, str]] = None,
+    resolved_cwd: Optional[str] = None,
 ) -> dict:
     """Execute a task and emit output events as data arrives."""
     use_shell, command_spec, cwd, env = prepare_task_execution(
@@ -445,11 +446,11 @@ def run_task(
     task: dict,
     extra_args: list[str],
     workspace: str,
-    inputs: dict[str, str] | None = None,
-    resolved_command: str | None = None,
-    resolved_args: list[str] | None = None,
-    resolved_env: dict[str, str] | None = None,
-    resolved_cwd: str | None = None,
+    inputs: Optional[dict[str, str]] = None,
+    resolved_command: Optional[str] = None,
+    resolved_args: Optional[list[str]] = None,
+    resolved_env: Optional[dict[str, str]] = None,
+    resolved_cwd: Optional[str] = None,
 ) -> dict:
     """Execute a task's shell command on the host and return the result."""
     use_shell, command_spec, cwd, env = prepare_task_execution(
@@ -502,8 +503,8 @@ def run_task(
 def run_direct_command(
     command: str,
     workspace: str,
-    env: dict[str, str] | None = None,
-    cwd: str | None = None,
+    env: Optional[dict[str, str]] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     synthetic_task = {
         "label": "host-script",
@@ -527,8 +528,8 @@ def stream_direct_command(
     command: str,
     workspace: str,
     emit_event,
-    env: dict[str, str] | None = None,
-    cwd: str | None = None,
+    env: Optional[dict[str, str]] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     synthetic_task = {
         "label": "host-script",
@@ -564,7 +565,7 @@ class TaskHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_json_body(self) -> dict | None:
+    def _read_json_body(self) -> Optional[dict]:
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length == 0:
             self._send_json(400, {"error": "Empty request body"})
@@ -576,7 +577,7 @@ class TaskHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid JSON"})
             return None
 
-    def _get_workspace(self, request: dict) -> str | None:
+    def _get_workspace(self, request: dict) -> Optional[str]:
         workspace = request.get("workspace", "")
         if not workspace:
             self._send_json(400, {"error": "'workspace' path is required"})
@@ -587,7 +588,7 @@ class TaskHandler(BaseHTTPRequestHandler):
             return None
         return resolved
 
-    def _parse_run_request(self, request: dict) -> dict | None:
+    def _parse_run_request(self, request: dict) -> Optional[dict]:
         workspace = self._get_workspace(request)
         if workspace is None:
             return None
@@ -655,7 +656,7 @@ class TaskHandler(BaseHTTPRequestHandler):
             "task": task,
         }
 
-    def _parse_exec_request(self, request: dict) -> dict | None:
+    def _parse_exec_request(self, request: dict) -> Optional[dict]:
         workspace = self._get_workspace(request)
         if workspace is None:
             return None
