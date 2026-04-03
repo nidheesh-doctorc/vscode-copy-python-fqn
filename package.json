@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.3.26",
+    "version": "1.3.27",
     "publisher": "DoctorC",
     "license": "MIT",
     "repository": {
@@ -76,6 +76,30 @@
                     "default": "worktree: ${worktreeName} / ${activeRepositoryBranchName}",
                     "scope": "machine",
                     "description": "Template used for the VS Code window title when worktree identity mode is workspaceSettings. Supports the additional ${worktreeName} placeholder."
+                },
+                "pythonCopyQualifiedName.worktreeIdentity.titleBarSaturation": {
+                    "type": "number",
+                    "default": 64,
+                    "minimum": 0,
+                    "maximum": 100,
+                    "scope": "machine",
+                    "description": "Saturation used for the worktree title bar color. Hue is still derived from the worktree name hash."
+                },
+                "pythonCopyQualifiedName.worktreeIdentity.titleBarLightThemeLightness": {
+                    "type": "number",
+                    "default": 46,
+                    "minimum": 0,
+                    "maximum": 100,
+                    "scope": "machine",
+                    "description": "Lightness used for the worktree title bar color when the active theme is light."
+                },
+                "pythonCopyQualifiedName.worktreeIdentity.titleBarDarkThemeLightness": {
+                    "type": "number",
+                    "default": 38,
+                    "minimum": 0,
+                    "maximum": 100,
+                    "scope": "machine",
+                    "description": "Lightness used for the worktree title bar color when the active theme is dark."
                 }
             }
         },

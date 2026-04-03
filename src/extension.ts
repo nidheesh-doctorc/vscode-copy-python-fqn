@@ -8,6 +8,13 @@ import { installHostScriptCli } from './hostScriptCliInstaller';
 const WORKTREE_TITLE_PREFIX = 'worktree';
 const WORKTREE_IDENTITY_MODE_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.mode';
 const WORKTREE_WINDOW_TITLE_TEMPLATE_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.windowTitleTemplate';
+const WORKTREE_TITLE_BAR_SATURATION_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.titleBarSaturation';
+const WORKTREE_LIGHT_THEME_LIGHTNESS_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.titleBarLightThemeLightness';
+const WORKTREE_DARK_THEME_LIGHTNESS_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.titleBarDarkThemeLightness';
+
+const DEFAULT_WORKTREE_TITLE_BAR_SATURATION = 64;
+const DEFAULT_WORKTREE_LIGHT_THEME_LIGHTNESS = 46;
+const DEFAULT_WORKTREE_DARK_THEME_LIGHTNESS = 38;
 
 type WorktreeIdentityMode = 'workspaceSettings' | 'statusBar' | 'off';
 
@@ -138,6 +145,9 @@ function setupWorktreeWindowIdentity(context: vscode.ExtensionContext): void {
             if (
                 event.affectsConfiguration(WORKTREE_IDENTITY_MODE_SETTING)
                 || event.affectsConfiguration(WORKTREE_WINDOW_TITLE_TEMPLATE_SETTING)
+                || event.affectsConfiguration(WORKTREE_TITLE_BAR_SATURATION_SETTING)
+                || event.affectsConfiguration(WORKTREE_LIGHT_THEME_LIGHTNESS_SETTING)
+                || event.affectsConfiguration(WORKTREE_DARK_THEME_LIGHTNESS_SETTING)
             ) {
                 void updateWindowIdentity();
             }
@@ -292,18 +302,36 @@ function buildTitleBarColorCustomizations(
 ): Record<string, string> {
     const hash = hashString(worktreeName.toLowerCase());
     const hue = hash % 360;
-    const saturation = 58 + (hash % 14);
-    const activeLightness = themeKind === vscode.ColorThemeKind.Light ? 46 : 38;
-    // const inactiveLightness = Math.min(activeLightness + 6, 84);
+    const saturation = getClampedWorktreeIdentitySetting(
+        'worktreeIdentity.titleBarSaturation',
+        DEFAULT_WORKTREE_TITLE_BAR_SATURATION
+    );
+    const activeLightness = themeKind === vscode.ColorThemeKind.Light
+        ? getClampedWorktreeIdentitySetting(
+            'worktreeIdentity.titleBarLightThemeLightness',
+            DEFAULT_WORKTREE_LIGHT_THEME_LIGHTNESS
+        )
+        : getClampedWorktreeIdentitySetting(
+            'worktreeIdentity.titleBarDarkThemeLightness',
+            DEFAULT_WORKTREE_DARK_THEME_LIGHTNESS
+        );
     const activeBackground = hslToHex(hue, saturation, activeLightness);
-    // const inactiveBackground = hslToHex(hue, Math.max(42, saturation - 10), inactiveLightness);
 
     return {
         'titleBar.activeBackground': activeBackground,
-        // 'titleBar.inactiveBackground': inactiveBackground,
-        'commandCenter.foreground': getContrastingTextColor(activeBackground),
-        // 'titleBar.inactiveForeground': getContrastingTextColor(inactiveBackground)
+        'commandCenter.foreground': getContrastingTextColor(activeBackground)
     };
+}
+
+function getClampedWorktreeIdentitySetting(setting: string, fallback: number): number {
+    const config = vscode.workspace.getConfiguration('pythonCopyQualifiedName');
+    const value = config.get<number>(setting, fallback);
+
+    if (!Number.isFinite(value)) {
+        return fallback;
+    }
+
+    return Math.max(0, Math.min(100, Math.round(value)));
 }
 
 function hashString(value: string): number {

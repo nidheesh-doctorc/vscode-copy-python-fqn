@@ -37,6 +37,11 @@ A Visual Studio Code extension that adds a "Copy As Fully Qualified Name" option
 - **Structured Results**: Returns exit code, stdout, and stderr as structured data
 - **Quick Pick UI**: Interactive task picker via command palette
 
+### Worktree Identity
+- **Window Title Identity**: Can write the active worktree name into the VS Code window title
+- **Theme-Aware Title Bar Color**: Derives the hue from the worktree name and lets you configure saturation plus separate light and dark theme lightness values
+- **Status Bar Alternative**: Can show the worktree name in the status bar without touching workspace settings
+
 ## Usage
 
 ### Copy Qualified Name
@@ -68,6 +73,18 @@ To access these settings:
 1. Open VS Code Settings (File > Preferences > Settings or `Cmd/Ctrl + ,`)
 2. Search for "Python Copy Qualified Name"
 3. Adjust the settings as needed
+
+### Worktree Identity
+
+The worktree identity feature can update your window title and title bar color so different worktrees are easier to distinguish.
+
+**Configuration Options:**
+
+- `pythonCopyQualifiedName.worktreeIdentity.mode`: Choose whether to update workspace settings, use the status bar, or disable the feature
+- `pythonCopyQualifiedName.worktreeIdentity.windowTitleTemplate`: Customize the window title template. Supports `${worktreeName}`
+- `pythonCopyQualifiedName.worktreeIdentity.titleBarSaturation`: Set the title bar saturation from `0` to `100`
+- `pythonCopyQualifiedName.worktreeIdentity.titleBarLightThemeLightness`: Set the title bar lightness from `0` to `100` for light themes
+- `pythonCopyQualifiedName.worktreeIdentity.titleBarDarkThemeLightness`: Set the title bar lightness from `0` to `100` for dark themes
 
 ### Run Tests from Gutter
 
