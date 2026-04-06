@@ -319,6 +319,9 @@ function buildTitleBarColorCustomizations(
 
     return {
         'titleBar.activeBackground': activeBackground,
+        'titleBar.inactiveBackground': activeBackground,
+        "titleBar.activeForeground": getContrastingTextColor(activeBackground),
+        "titleBar.inactiveForeground": getContrastingTextColor(activeBackground),
         'commandCenter.foreground': getContrastingTextColor(activeBackground)
     };
 }
