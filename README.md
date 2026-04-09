@@ -28,7 +28,7 @@ A Visual Studio Code extension that adds a "Copy As Fully Qualified Name" option
 
 ### Host Task Runner (Devcontainer → Host)
 - **Run Host Commands**: Execute shell commands on the host machine from inside a devcontainer
-- **Direct CLI**: Use `host-script "..."` from the devcontainer shell to execute an arbitrary host command
+- **Direct CLI Allowlist**: Use `host-script "..."` from the devcontainer shell for a small set of explicitly allowed host commands
 - **tasks.json Driven**: Uses `.vscode/tasks.json` — tasks with `"type": "hostScript"` run on the host
 - **Host Input Support**: Use `${hostInput:name}` in host tasks to prompt once for task parameters
 - **Env Variable Expansion**: `${env:NAME}` is expanded against the host environment before execution
@@ -153,15 +153,21 @@ The script downloads `server.py` to `~/.local/share/vscode-host-task-server/`, s
 
 The server is global — one process handles all workspaces and worktrees. The extension sends the workspace path with each request.
 
-When the extension activates, it also installs a small `host-script` wrapper into the first writable PATH directory it can use, preferring `/usr/local/bin/host-script` and falling back to `~/.local/bin/host-script`. That wrapper talks directly to the host server, so from the devcontainer shell you can run:
+When the extension activates, it also installs a small `host-script` wrapper into the first writable PATH directory it can use, preferring `/usr/local/bin/host-script` and falling back to `~/.local/bin/host-script`. That wrapper talks directly to the host server, but direct CLI execution is intentionally allowlisted. From the devcontainer shell you can run:
 
 ```bash
-host-script "docker-compose up -d"
-host-script "whoami"
-host-script 'echo ${env:USER}'
+host-script '${env:HOST_PROJECT_PATH}/infra/scripts/manage-emulators.sh run drc_test_1'
+host-script "docker-compose -f infra/docker/dev_docker/docker-compose.yml -f infra/docker/dev_docker/docker-compose.services.yml --project-name doctorc up -d --scale drc-selenium-chrome=1 drc-selenium-chrome drc-selenium-hub"
 ```
 
 The CLI expands `${env:NAME}` and `${workspaceFolder}` locally before sending the command to the host server, then streams stdout/stderr back to your terminal.
+
+Direct CLI security notes:
+
+- The `host-script` CLI no longer accepts arbitrary shell commands.
+- Only the two allowlisted command families above are accepted through the direct `/exec` path.
+- Direct `/exec` requests always run with server-derived environment variables and use the workspace root as `cwd`.
+- Curated `hostScript` tasks loaded from `.vscode/tasks.json` are unaffected and continue to run through the task-based `/run` path.
 
 ##### Extension settings
 
@@ -273,15 +279,16 @@ The `inputs` section still defines the prompt metadata. The difference is only t
 For one-off commands that do not need a named `tasks.json` entry, use the installed CLI:
 
 ```bash
-host-script "docker-compose up -d"
-host-script "whoami"
-host-script "cd ${workspaceFolder} && git status --short"
+host-script '${env:HOST_PROJECT_PATH}/infra/scripts/manage-emulators.sh run drc_test_1'
+host-script "docker-compose -f infra/docker/dev_docker/docker-compose.yml -f infra/docker/dev_docker/docker-compose.services.yml --project-name doctorc up -d --scale drc-selenium-chrome=1 drc-selenium-chrome drc-selenium-hub"
 ```
 
 Behavior:
 
 - The CLI sends the current host workspace path from `HOST_PROJECT_PATH` when available, otherwise it falls back to the current working directory.
 - `${env:NAME}` placeholders are expanded in the devcontainer before the request is sent.
+- Only the direct commands listed above are accepted; other commands must be exposed through curated `hostScript` tasks in `.vscode/tasks.json`.
+- Direct CLI execution always runs with the server's environment and the workspace root as the working directory.
 - Output is streamed live from the host server back to the devcontainer terminal.
 
 **From an LLM agent** (inside the devcontainer), use the VS Code `run_task` tool:

@@ -22,6 +22,8 @@ import os
 import pwd
 import queue
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -35,6 +37,22 @@ DEFAULT_PORT = 7890
 TASK_TYPE = "hostScript"
 INPUT_PATTERN = re.compile(r"\$\{(?:input|hostInput):([^}]+)\}")
 ENV_PATTERN = re.compile(r"\$\{env:([^}]+)\}")
+DIRECT_MANAGE_EMULATORS_RELATIVE_PATH = Path("infra") / "scripts" / "manage-emulators.sh"
+DIRECT_DOCKER_COMPOSE_ARGV = [
+    "docker-compose",
+    "-f",
+    "infra/docker/dev_docker/docker-compose.yml",
+    "-f",
+    "infra/docker/dev_docker/docker-compose.services.yml",
+    "--project-name",
+    "doctorc",
+    "up",
+    "-d",
+    "--scale",
+    "drc-selenium-chrome=1",
+    "drc-selenium-chrome",
+    "drc-selenium-hub",
+]
 _INTERACTIVE_SHELL_ENV_CACHE: Optional[dict[str, str]] = None
 _INTERACTIVE_SHELL_PATH_CACHE: Optional[str] = None
 
@@ -225,6 +243,80 @@ def expand_task_value(
     return replace_env_patterns(expanded, env)
 
 
+def build_host_command_environment() -> tuple[dict[str, str], dict[str, str]]:
+    env = os.environ.copy()
+    interactive_shell_env = load_interactive_shell_environment()
+    if interactive_shell_env:
+        env.update(interactive_shell_env)
+
+    # Host commands have no stdin bridge from VS Code, so force known
+    # prompt-driven tools into non-interactive mode where possible.
+    env.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+    return env, interactive_shell_env
+
+
+def parse_direct_command_argv(command: str) -> list[str]:
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError as exc:
+        raise ValueError(f"Invalid command syntax: {exc}") from exc
+
+    if not argv:
+        raise ValueError("'command' must contain an executable")
+
+    return argv
+
+
+def validate_direct_command(command: str, workspace: str) -> tuple[list[str], str]:
+    argv = parse_direct_command_argv(command)
+    allowed_manage_emulators = os.path.realpath(str(Path(workspace) / DIRECT_MANAGE_EMULATORS_RELATIVE_PATH))
+    requested_executable = os.path.realpath(os.path.expanduser(argv[0]))
+
+    if requested_executable == allowed_manage_emulators:
+        return argv, "manage-emulators script"
+
+    if argv == DIRECT_DOCKER_COMPOSE_ARGV:
+        resolved_executable = shutil.which("docker-compose")
+        if not resolved_executable:
+            raise ValueError("Allowed command unavailable: docker-compose was not found on the host")
+        return [resolved_executable, *argv[1:]], "docker-compose"
+
+    raise ValueError("Direct command is not allowed")
+
+
+def validate_direct_execution_context(
+    env: Optional[dict[str, str]],
+    cwd: Optional[str],
+    workspace: str,
+) -> None:
+    if env not in (None, {}):
+        raise ValueError("Direct command env overrides are not allowed")
+
+    if cwd in (None, ""):
+        return
+
+    resolved_cwd = os.path.realpath(os.path.expanduser(cwd))
+    if resolved_cwd != workspace:
+        raise ValueError("Direct command cwd overrides are not allowed")
+
+
+def prepare_direct_execution(
+    command_argv: list[str],
+    workspace: str,
+) -> tuple[list[str], str, dict[str, str]]:
+    merged_env, interactive_shell_env = build_host_command_environment()
+    execution_cwd = workspace
+
+    log_server(f"  Direct argv: {command_argv}")
+    log_server(f"  Cwd: {execution_cwd}")
+    if interactive_shell_env:
+        log_server(f"  Interactive shell env merged: {len(interactive_shell_env)} key(s)")
+    else:
+        log_server("  Interactive shell env merged: unavailable; using server process environment")
+
+    return command_argv, execution_cwd, merged_env
+
+
 def prepare_task_execution(
     task: dict,
     extra_args: list[str],
@@ -238,16 +330,9 @@ def prepare_task_execution(
     """Resolve a task into subprocess arguments, cwd, and environment."""
     options = task.get("options", {})
     cwd = resolved_cwd if resolved_cwd is not None else options.get("cwd", workspace)
-    env = os.environ.copy()
-    interactive_shell_env = load_interactive_shell_environment()
-    if interactive_shell_env:
-        env.update(interactive_shell_env)
+    env, interactive_shell_env = build_host_command_environment()
     env_vars = options.get("env", {})
     login_shell = get_login_shell()
-
-    # Host tasks have no stdin bridge from VS Code, so force known prompt-driven
-    # tools into non-interactive mode where possible.
-    env.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
 
     log_server(f"  Raw options.cwd: {options.get('cwd', None)}")
     log_server(f"  Raw options.env: {env_vars}")
@@ -501,53 +586,152 @@ def run_task(
 
 
 def run_direct_command(
-    command: str,
+    command_argv: list[str],
     workspace: str,
-    env: Optional[dict[str, str]] = None,
-    cwd: Optional[str] = None,
 ) -> dict:
-    synthetic_task = {
-        "label": "host-script",
-        "command": "",
-        "args": [],
-        "options": {},
-    }
-    return run_task(
-        synthetic_task,
-        [],
-        workspace,
-        None,
-        command,
-        None,
-        env,
-        cwd,
-    )
+    command_spec, execution_cwd, execution_env = prepare_direct_execution(command_argv, workspace)
+    timeout = 1200
+
+    try:
+        proc = subprocess.run(
+            command_spec,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=execution_cwd,
+            env=execution_env,
+        )
+        log_task_output(workspace, "host-script", "stdout", proc.stdout)
+        log_task_output(workspace, "host-script", "stderr", proc.stderr)
+        return {
+            "success": proc.returncode == 0,
+            "exitCode": proc.returncode,
+            "output": proc.stdout,
+            "error": proc.stderr,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "exitCode": -1,
+            "output": "",
+            "error": f"Task timed out after {timeout}s",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "exitCode": -1,
+            "output": "",
+            "error": str(e),
+        }
 
 
 def stream_direct_command(
-    command: str,
+    command_argv: list[str],
     workspace: str,
     emit_event,
-    env: Optional[dict[str, str]] = None,
-    cwd: Optional[str] = None,
 ) -> dict:
-    synthetic_task = {
-        "label": "host-script",
-        "command": "",
-        "args": [],
-        "options": {},
-    }
-    return stream_task(
-        synthetic_task,
-        [],
-        workspace,
-        emit_event,
-        None,
-        command,
-        None,
-        env,
-        cwd,
-    )
+    command_spec, execution_cwd, execution_env = prepare_direct_execution(command_argv, workspace)
+    timeout = 1200
+    event_queue: queue.Queue[dict] = queue.Queue()
+    proc = None
+
+    def read_stream(stream_name: str, stream) -> None:
+        try:
+            for chunk in iter(stream.readline, ""):
+                if chunk:
+                    log_task_output(workspace, "host-script", stream_name, chunk)
+                    event_queue.put({"type": stream_name, "data": chunk})
+        finally:
+            if stream is not None:
+                stream.close()
+            event_queue.put({"type": "stream-closed", "stream": stream_name})
+
+    try:
+        proc = subprocess.Popen(
+            command_spec,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=execution_cwd,
+            env=execution_env,
+        )
+
+        stdout_thread = threading.Thread(
+            target=read_stream,
+            args=("stdout", proc.stdout),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=read_stream,
+            args=("stderr", proc.stderr),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        deadline = time.monotonic() + timeout
+        open_streams = 2
+        while open_streams > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command_spec, timeout)
+            try:
+                event = event_queue.get(timeout=min(0.1, remaining))
+            except queue.Empty:
+                continue
+
+            if event["type"] == "stream-closed":
+                open_streams -= 1
+                continue
+
+            emit_event(event)
+
+        exit_code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        result = {
+            "success": exit_code == 0,
+            "exitCode": exit_code,
+            "output": "",
+            "error": "",
+        }
+        emit_event(
+            {
+                "type": "exit",
+                "success": result["success"],
+                "exitCode": result["exitCode"],
+            }
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        timeout_message = f"Task timed out after {timeout}s"
+        emit_event({"type": "stderr", "data": f"{timeout_message}\n"})
+        emit_event({"type": "exit", "success": False, "exitCode": -1})
+        return {
+            "success": False,
+            "exitCode": -1,
+            "output": "",
+            "error": timeout_message,
+        }
+    except Exception as e:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        error_message = str(e)
+        emit_event({"type": "stderr", "data": f"{error_message}\n"})
+        emit_event({"type": "exit", "success": False, "exitCode": -1})
+        return {
+            "success": False,
+            "exitCode": -1,
+            "output": "",
+            "error": error_message,
+        }
 
 
 class TaskHandler(BaseHTTPRequestHandler):
@@ -680,11 +864,18 @@ class TaskHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "'cwd' must be a string"})
             return None
 
+        try:
+            validate_direct_execution_context(env, cwd, workspace)
+            command_argv, allowlist_rule = validate_direct_command(command, workspace)
+        except ValueError as exc:
+            self._send_json(403, {"error": str(exc)})
+            return None
+
         return {
             "workspace": workspace,
             "command": command,
-            "env": env,
-            "cwd": cwd,
+            "commandArgv": command_argv,
+            "allowlistRule": allowlist_rule,
         }
 
     def _log_run_request(self, run_request: dict) -> None:
@@ -704,10 +895,8 @@ class TaskHandler(BaseHTTPRequestHandler):
     def _log_exec_request(self, exec_request: dict) -> None:
         short_ws = os.path.basename(exec_request["workspace"])
         log_server(f"  Executing direct command: [{short_ws}] {exec_request['command']}")
-        if exec_request["cwd"] is not None:
-            log_server(f"  cwd: {exec_request['cwd']}")
-        if exec_request["env"] is not None:
-            log_server(f"  env keys: {sorted(exec_request['env'].keys())}")
+        log_server(f"  Allowlist rule: {exec_request['allowlistRule']}")
+        log_server(f"  Parsed argv: {exec_request['commandArgv']}")
 
     def _send_stream_event(self, event: dict) -> None:
         payload = json.dumps(event).encode("utf-8") + b"\n"
@@ -784,10 +973,8 @@ class TaskHandler(BaseHTTPRequestHandler):
 
             self._log_exec_request(exec_request)
             result = run_direct_command(
-                exec_request["command"],
+                exec_request["commandArgv"],
                 exec_request["workspace"],
-                exec_request["env"],
-                exec_request["cwd"],
             )
             status_text = "OK" if result["success"] else "FAILED"
             print(f"  [{status_text}] exit={result['exitCode']}")
@@ -841,11 +1028,9 @@ class TaskHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             result = stream_direct_command(
-                exec_request["command"],
+                exec_request["commandArgv"],
                 exec_request["workspace"],
                 self._send_stream_event,
-                exec_request["env"],
-                exec_request["cwd"],
             )
             status_text = "OK" if result["success"] else "FAILED"
             print(f"  [{status_text}] exit={result['exitCode']}")

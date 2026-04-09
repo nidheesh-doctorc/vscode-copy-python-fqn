@@ -15,6 +15,7 @@ interface TaskExitStreamEvent {
 type TaskStreamEvent = TaskOutputStreamEvent | TaskExitStreamEvent;
 
 const ENV_PATTERN = /\$\{env:([^}]+)\}/g;
+const DIRECT_DOCKER_COMPOSE_COMMAND = 'docker-compose -f infra/docker/dev_docker/docker-compose.yml -f infra/docker/dev_docker/docker-compose.services.yml --project-name doctorc up -d --scale drc-selenium-chrome=1 drc-selenium-chrome drc-selenium-hub';
 
 function detectDefaultHost(): string {
     if (process.env.REMOTE_CONTAINERS === 'true'
@@ -56,12 +57,25 @@ function expandLocalValues(command: string, workspacePath: string): string {
     });
 }
 
+function getAllowedManageEmulatorsPrefix(workspacePath: string): string {
+    return `${workspacePath}/infra/scripts/manage-emulators.sh`;
+}
+
+function isAllowedDirectCommand(command: string, workspacePath: string): boolean {
+    if (command === DIRECT_DOCKER_COMPOSE_COMMAND) {
+        return true;
+    }
+
+    const manageEmulatorsPrefix = getAllowedManageEmulatorsPrefix(workspacePath);
+    return command === manageEmulatorsPrefix || command.startsWith(`${manageEmulatorsPrefix} `);
+}
+
 function printUsage(): void {
     process.stderr.write(
         'Usage: host-script <command>\n\n' +
-        'Examples:\n' +
-        '  host-script "docker-compose up -d"\n' +
-        '  host-script "whoami"\n'
+        'Allowed direct commands:\n' +
+        '  host-script "${env:HOST_PROJECT_PATH}/infra/scripts/manage-emulators.sh <args>"\n' +
+        '  host-script "docker-compose -f infra/docker/dev_docker/docker-compose.yml -f infra/docker/dev_docker/docker-compose.services.yml --project-name doctorc up -d --scale drc-selenium-chrome=1 drc-selenium-chrome drc-selenium-hub"\n'
     );
 }
 
@@ -121,10 +135,16 @@ async function run(): Promise<number> {
     const port = Number(process.env.HOST_TASK_SERVER_PORT ?? '7890');
     const workspace = getWorkspacePath();
     const command = expandLocalValues(buildCommand(commandArgs), workspace);
+
+    if (!isAllowedDirectCommand(command, workspace)) {
+        process.stderr.write('Direct host-script commands are restricted to the configured allowlist.\n');
+        printUsage();
+        return 1;
+    }
+
     const body = JSON.stringify({
         workspace,
-        command,
-        cwd: workspace
+        command
     });
 
     let exitCode = 1;

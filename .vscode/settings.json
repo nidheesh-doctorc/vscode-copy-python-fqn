@@ -1,0 +1,10 @@
+{
+    "window.title": "worktree: vscode-copy-python-path / ${activeRepositoryBranchName}",
+    "workbench.colorCustomizations": {
+        "titleBar.activeBackground": "#435c3d",
+        "titleBar.inactiveBackground": "#435c3d",
+        "titleBar.activeForeground": "#f8fafc",
+        "titleBar.inactiveForeground": "#f8fafc",
+        "commandCenter.foreground": "#f8fafc"
+    }
+}
