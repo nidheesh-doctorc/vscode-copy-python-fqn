@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { PythonFileMonitor } from './fileMonitor';
 import { HostScriptRunner, registerHostScriptCommands } from './hostScriptRunner';
 import { installHostScriptCli } from './hostScriptCliInstaller';
+import { VscodeMcpBridge } from './vscodeMcpBridge';
 
 const WORKTREE_TITLE_PREFIX = 'worktree';
 const WORKTREE_IDENTITY_MODE_SETTING = 'pythonCopyQualifiedName.worktreeIdentity.mode';
@@ -46,6 +47,16 @@ interface TestLaunchResult {
     completed: boolean;
     exitCode?: number;
     errorMessage?: string;
+}
+
+interface ListVsCodeTasksInput {
+    type?: string;
+}
+
+interface RunVsCodeTaskInput {
+    label: string;
+    type?: string;
+    workspaceFolder?: string;
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -100,7 +111,196 @@ export function activate(context: vscode.ExtensionContext) {
     registerHostScriptCommands(context, hostScriptRunner);
     void installHostScriptCli(context);
 
+    const vscodeMcpBridge = new VscodeMcpBridge(context);
+    context.subscriptions.push(vscodeMcpBridge);
+
+    registerLanguageModelTaskTools(context);
+    registerWindowScopedMcpServer(context, vscodeMcpBridge);
     setupWorktreeWindowIdentity(context);
+}
+
+function getVscodeLmApi(): {
+    registerTool?: (name: string, tool: unknown) => vscode.Disposable;
+    registerMcpServerDefinitionProvider?: (id: string, provider: unknown) => vscode.Disposable;
+} | undefined {
+    return (vscode as unknown as {
+        lm?: {
+            registerTool?: (name: string, tool: unknown) => vscode.Disposable;
+            registerMcpServerDefinitionProvider?: (id: string, provider: unknown) => vscode.Disposable;
+        };
+    }).lm;
+}
+
+function createLanguageModelTextResult(text: string): unknown {
+    const vscodeWithLmResult = vscode as unknown as {
+        LanguageModelToolResult?: new (parts: unknown[]) => unknown;
+        LanguageModelTextPart?: new (value: string) => unknown;
+    };
+
+    if (vscodeWithLmResult.LanguageModelToolResult && vscodeWithLmResult.LanguageModelTextPart) {
+        return new vscodeWithLmResult.LanguageModelToolResult([
+            new vscodeWithLmResult.LanguageModelTextPart(text)
+        ]);
+    }
+
+    return { content: [{ type: 'text', value: text }] };
+}
+
+function serializeTaskScope(scope: vscode.Task['scope']): string {
+    if (!scope) {
+        return 'unknown';
+    }
+    if (typeof scope === 'number') {
+        return scope === vscode.TaskScope.Global
+            ? 'global'
+            : scope === vscode.TaskScope.Workspace
+                ? 'workspace'
+                : String(scope);
+    }
+    return scope.uri.fsPath;
+}
+
+function serializeTask(task: vscode.Task): Record<string, unknown> {
+    return {
+        label: task.name,
+        source: task.source,
+        scope: serializeTaskScope(task.scope),
+        type: typeof task.definition.type === 'string' ? task.definition.type : undefined,
+        detail: task.detail
+    };
+}
+
+function findWorkspaceFolderByPath(workspaceFolderPath: string | undefined): vscode.WorkspaceFolder | undefined {
+    if (!workspaceFolderPath) {
+        return undefined;
+    }
+    return vscode.workspace.workspaceFolders?.find((folder) => folder.uri.fsPath === workspaceFolderPath);
+}
+
+function taskMatchesWorkspaceFolder(task: vscode.Task, workspaceFolder: vscode.WorkspaceFolder | undefined): boolean {
+    if (!workspaceFolder) {
+        return true;
+    }
+    return typeof task.scope === 'object' && task.scope.uri.fsPath === workspaceFolder.uri.fsPath;
+}
+
+function registerLanguageModelTaskTools(context: vscode.ExtensionContext): void {
+    const lm = getVscodeLmApi();
+    if (!lm?.registerTool) {
+        return;
+    }
+
+    context.subscriptions.push(
+        lm.registerTool('doctorc_list_vscode_tasks', {
+            async invoke(options: { input: ListVsCodeTasksInput }) {
+                const filter = options.input.type ? { type: options.input.type } : undefined;
+                const tasks = await vscode.tasks.fetchTasks(filter);
+                return createLanguageModelTextResult(JSON.stringify({
+                    workspaceFolders: vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [],
+                    tasks: tasks.map(serializeTask)
+                }));
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        lm.registerTool('doctorc_run_vscode_task', {
+            prepareInvocation(options: { input: RunVsCodeTaskInput }) {
+                const label = options.input.label || '<missing label>';
+                return {
+                    invocationMessage: `Running VS Code task ${label}`,
+                    confirmationMessages: {
+                        title: 'Run VS Code task',
+                        message: new vscode.MarkdownString(`Run VS Code task \`${label}\` in this window?`)
+                    }
+                };
+            },
+            async invoke(options: { input: RunVsCodeTaskInput }) {
+                const { label, type, workspaceFolder: workspaceFolderPath } = options.input;
+                if (!label) {
+                    throw new Error('Task label is required.');
+                }
+
+                const workspaceFolder = findWorkspaceFolderByPath(workspaceFolderPath);
+                if (workspaceFolderPath && !workspaceFolder) {
+                    throw new Error(`Workspace folder is not open in this window: ${workspaceFolderPath}`);
+                }
+
+                const tasks = await vscode.tasks.fetchTasks(type ? { type } : undefined);
+                const matches = tasks.filter((task) =>
+                    task.name === label && taskMatchesWorkspaceFolder(task, workspaceFolder)
+                );
+
+                if (matches.length === 0) {
+                    return createLanguageModelTextResult(JSON.stringify({
+                        started: false,
+                        error: `No VS Code task matched label: ${label}`,
+                        availableTasks: tasks.map(serializeTask)
+                    }));
+                }
+
+                if (matches.length > 1) {
+                    return createLanguageModelTextResult(JSON.stringify({
+                        started: false,
+                        error: `Multiple VS Code tasks matched label: ${label}`,
+                        matches: matches.map(serializeTask)
+                    }));
+                }
+
+                const execution = await vscode.tasks.executeTask(matches[0]);
+                return createLanguageModelTextResult(JSON.stringify({
+                    started: true,
+                    task: serializeTask(execution.task)
+                }));
+            }
+        })
+    );
+}
+
+function registerWindowScopedMcpServer(context: vscode.ExtensionContext, vscodeMcpBridge: VscodeMcpBridge): void {
+    const lm = getVscodeLmApi();
+    const vscodeWithMcp = vscode as unknown as {
+        McpStdioServerDefinition?: new (
+            label: string,
+            command: string,
+            args?: string[],
+            env?: Record<string, string | number | null>,
+            version?: string
+        ) => unknown;
+    };
+
+    if (!lm?.registerMcpServerDefinitionProvider || !vscodeWithMcp.McpStdioServerDefinition) {
+        return;
+    }
+
+    const McpStdioServerDefinition = vscodeWithMcp.McpStdioServerDefinition;
+    const didChangeEmitter = new vscode.EventEmitter<void>();
+    context.subscriptions.push(didChangeEmitter);
+
+    context.subscriptions.push(
+        lm.registerMcpServerDefinitionProvider('doctorc-vscode-window-mcp', {
+            onDidChangeMcpServerDefinitions: didChangeEmitter.event,
+            provideMcpServerDefinitions: async () => {
+                const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+                const serverScript = context.asAbsolutePath('mcp/doctorc-vscode-window-mcp.js');
+
+                const serverEnv = await vscodeMcpBridge.getMcpServerEnv();
+                const serverDefinition = new McpStdioServerDefinition(
+                    'DoctorC VS Code Window MCP',
+                    process.execPath,
+                    [serverScript],
+                    {
+                        ...serverEnv,
+                        DOCTORC_VSCODE_WINDOW_MCP_VERSION: '0.1.0',
+                    },
+                    '0.1.0'
+                ) as { cwd?: vscode.Uri };
+                serverDefinition.cwd = workspaceFolders[0]?.uri;
+                return [serverDefinition];
+            },
+            resolveMcpServerDefinition: async (server: unknown) => server,
+        })
+    );
 }
 
 function setupWorktreeWindowIdentity(context: vscode.ExtensionContext): void {

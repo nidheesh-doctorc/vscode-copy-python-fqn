@@ -2,7 +2,7 @@
     "name": "python-copy-qualified-name",
     "displayName": "Python Copy Qualified Name",
     "description": "Copy fully qualified Python method and function names to clipboard",
-    "version": "1.3.29",
+    "version": "1.3.30",
     "publisher": "DoctorC",
     "license": "MIT",
     "repository": {
@@ -103,6 +103,59 @@
                 }
             }
         },
+        "mcpServerDefinitionProviders": [
+            {
+                "id": "doctorc-vscode-window-mcp",
+                "label": "DoctorC VS Code Window MCP"
+            }
+        ],
+        "languageModelTools": [
+            {
+                "name": "doctorc_list_vscode_tasks",
+                "displayName": "List VS Code Tasks",
+                "toolReferenceName": "doctorcListVsCodeTasks",
+                "canBeReferencedInPrompt": true,
+                "icon": "$(checklist)",
+                "userDescription": "List VS Code tasks available in the current workspace window.",
+                "modelDescription": "Lists VS Code tasks visible to the current VS Code extension host/window. Use this before running a VS Code task when the exact task label or task type is unclear.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "description": "Optional VS Code task type filter, such as shell or hostScript."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "doctorc_run_vscode_task",
+                "displayName": "Run VS Code Task",
+                "toolReferenceName": "doctorcRunVsCodeTask",
+                "canBeReferencedInPrompt": true,
+                "icon": "$(play)",
+                "userDescription": "Run a VS Code task by label in the current workspace window.",
+                "modelDescription": "Runs a VS Code task from the current VS Code extension host/window using vscode.tasks.executeTask, preserving VS Code task resolution, dependencies, inputs, environment, host/container task providers, and workspace scope. Use only when the user asks to run, start, launch, or execute a VS Code task.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["label"],
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "description": "Exact VS Code task label/name to run."
+                        },
+                        "type": {
+                            "type": "string",
+                            "description": "Optional VS Code task type filter, such as shell or hostScript."
+                        },
+                        "workspaceFolder": {
+                            "type": "string",
+                            "description": "Optional absolute workspace folder path. Use this to disambiguate same-label tasks in multi-root windows."
+                        }
+                    }
+                }
+            }
+        ],
         "taskDefinitions": [
             {
                 "type": "hostScript",
