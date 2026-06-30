@@ -15,7 +15,7 @@ let inputBuffer = Buffer.alloc(0);
 let transportMode;
 
 function registryDir() {
-    return process.env.DOCTORC_VSCODE_MCP_REGISTRY_DIR || path.join(os.tmpdir(), 'doctorc-vscode-mcp');
+    return process.env.DOCTORC_VSCODE_MCP_REGISTRY_DIR || path.join(os.homedir(), '.agents', 'doctorc-vscode-mcp');
 }
 
 function registryPathForWorkspace(workspacePath) {

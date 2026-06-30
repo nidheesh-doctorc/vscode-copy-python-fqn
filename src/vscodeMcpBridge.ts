@@ -26,7 +26,7 @@ interface StartDebugRequest {
 }
 
 function getVscodeMcpRegistryDir(): string {
-    return path.join(os.tmpdir(), 'doctorc-vscode-mcp');
+    return path.join(os.homedir(), '.agents', 'doctorc-vscode-mcp');
 }
 
 function getVscodeMcpRegistryPath(workspacePath: string): string {
