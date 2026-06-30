@@ -39,7 +39,9 @@ function getWorkspaceFolders(): readonly vscode.WorkspaceFolder[] {
 }
 
 function getWorkspaceFolderPaths(): string[] {
-    return getWorkspaceFolders().map((folder) => folder.uri.fsPath);
+    const paths = getWorkspaceFolders().map((folder) => folder.uri.fsPath);
+    const hostProjectPath = process.env.HOST_PROJECT_PATH;
+    return hostProjectPath && !paths.includes(hostProjectPath) ? [...paths, hostProjectPath] : paths;
 }
 
 function findWorkspaceFolder(workspaceFolderPath: string | undefined): vscode.WorkspaceFolder | undefined {
@@ -141,14 +143,10 @@ export class VscodeMcpBridge implements vscode.Disposable {
         }
 
         const workspaceFolders = getWorkspaceFolderPaths();
-        const hostProjectPath = process.env.HOST_PROJECT_PATH;
-        const allWorkspaceFolders = hostProjectPath && !workspaceFolders.includes(hostProjectPath)
-            ? [...workspaceFolders, hostProjectPath]
-            : workspaceFolders;
         const registry: BridgeRegistry = {
             port: this.port,
             pid: process.pid,
-            workspaceFolders: allWorkspaceFolders,
+            workspaceFolders,
             extensionId: this.context.extension.id,
             updatedAt: new Date().toISOString()
         };
@@ -172,7 +170,7 @@ export class VscodeMcpBridge implements vscode.Disposable {
 
         await new Promise<void>((resolve, reject) => {
             this.server?.once('error', reject);
-            this.server?.listen(listenPort, '127.0.0.1', () => resolve());
+            this.server?.listen(listenPort, '0.0.0.0', () => resolve());
         });
 
         const address = this.server.address();
@@ -182,7 +180,7 @@ export class VscodeMcpBridge implements vscode.Disposable {
 
         this.port = address.port;
         await this.refreshRegistry();
-        this.output.appendLine(`Bridge listening on 127.0.0.1:${this.port}`);
+        this.output.appendLine(`Bridge listening on 0.0.0.0:${this.port}`);
     }
 
     private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
