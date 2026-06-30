@@ -141,10 +141,14 @@ export class VscodeMcpBridge implements vscode.Disposable {
         }
 
         const workspaceFolders = getWorkspaceFolderPaths();
+        const hostProjectPath = process.env.HOST_PROJECT_PATH;
+        const allWorkspaceFolders = hostProjectPath && !workspaceFolders.includes(hostProjectPath)
+            ? [...workspaceFolders, hostProjectPath]
+            : workspaceFolders;
         const registry: BridgeRegistry = {
             port: this.port,
             pid: process.pid,
-            workspaceFolders,
+            workspaceFolders: allWorkspaceFolders,
             extensionId: this.context.extension.id,
             updatedAt: new Date().toISOString()
         };
