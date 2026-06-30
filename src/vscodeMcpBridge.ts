@@ -167,9 +167,12 @@ export class VscodeMcpBridge implements vscode.Disposable {
             void this.handleRequest(req, res);
         });
 
+        const worktreeHostPort = process.env.WORKTREE_HOST_PORT ? parseInt(process.env.WORKTREE_HOST_PORT, 10) : undefined;
+        const listenPort = worktreeHostPort ? worktreeHostPort + 1500 : 0;
+
         await new Promise<void>((resolve, reject) => {
             this.server?.once('error', reject);
-            this.server?.listen(0, '127.0.0.1', () => resolve());
+            this.server?.listen(listenPort, '127.0.0.1', () => resolve());
         });
 
         const address = this.server.address();
